@@ -61,6 +61,8 @@ Local install も可: `npm install @warusakudeveroper/mcp-arduino-esp32`
 | `monitor_start` | `port`, `auto_baud`, `max_seconds`, `stop_on` etc. | `token` を返し、シリアル・終了イベント送信 | Python + pyserial、リセット込み |
 | `monitor_stop` | `token` または `port` | 停止サマリ | `monitor_start` のセッションを停止 |
 | `pdca_cycle` | `sketch_path`, `port`, `monitor_seconds` | コンパイル・アップロード・モニタまとめ | `monitor_seconds` 秒だけ監視 |
+| `pin_spec` | — | DevKitC のピン仕様テーブル | capabilities/notes を JSON で返却 |
+| `pin_check` | `sketch_path`, `include_headers` | `warnings[]`, `usage[]`, `unknownIdentifiers[]` | ピンモード/使用状況と DevKitC 仕様の整合性を検証 |
 
 ### 3.1 重要仕様
 - すべてのツールは MCP `CallToolResult` として `structuredContent` / テキスト要約を返す。
@@ -70,6 +72,35 @@ Local install も可: `npm install @warusakudeveroper/mcp-arduino-esp32`
   - `event/serial_end` … `reason`, `elapsedSeconds`, `rebootDetected`, `lastLine`
 - 停止条件 `stop_on` は正規表現（コンパイル前に検証）。
 - パーティション変更などのカスタマイズは `build_props` (例: `build.partitions`) で対応。
+
+### 3.2 ESP32-DevKitC ピン仕様 (`pin_spec`)
+
+`pin_spec` ツールは公式ドキュメントの概要に基づき、DevKitC の各 GPIO の機能を返します（主なフィールド例）。
+
+| フィールド | 説明 |
+| ---------- | ---- |
+| `number` / `name` | GPIO 番号とラベル（例: `IO0`） |
+| `available` | SPI フラッシュへ接続されるなど、利用不可の場合は `false` |
+| `digitalIn` / `digitalOut` | デジタル入出力が可能か |
+| `analogIn` | ADC 入力として利用できるか |
+| `dac` | DAC 出力 (IO25/IO26) |
+| `touch` | タッチセンサ対応ピン (T0〜T9) |
+| `pwm` | LEDC/PWM として利用可能か |
+| `inputOnly` | 出力不可の入力専用ピン (IO34–IO39) |
+| `strapping` | ブートストラップピン（起動モードへ影響） |
+| `notes` | UART/I2C/VSPI などの注意点 |
+
+### 3.3 ピン整合性チェック (`pin_check`)
+
+- `.ino/.cpp`（必要に応じ `.h`）を走査し、`pinMode` / `digitalWrite` / `analogRead` / `touchRead` などを解析。
+- 代表的な検出内容:
+  - 入力専用ピン (IO34–IO39) に対する `pinMode(..., OUTPUT)` や `digitalWrite()` を **Error** として報告。
+  - ブートストラップピン (IO0/2/4/5/12/15) を出力駆動している場合は **Warning**（起動モードへの影響を説明）。
+  - ADC 非対応ピンでの `analogRead()`、タッチ非対応ピンでの `touchRead()`、DAC 非対応ピンの `dacWrite()` などを検出。
+  - SPI フラッシュ専用ピン (GPIO6〜11) を使用していれば警告。
+  - マクロ等で解析できなかった識別子は `unknownIdentifiers` として列挙。
+
+戻り値は `ok`（致命的エラー有無）、`warnings[]`（severity=error/warning/info）、`usage[]`（各ピンの使用状況）、`unknownIdentifiers[]` を含む JSON。エージェントが機能整合性を判断しやすい構造です。
 
 ## 4. MCP クライアント設定例
 

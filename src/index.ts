@@ -131,6 +131,79 @@ finally:
     ser.close()
 `;
 
+const DEVKITC_PIN_SPEC: PinSpec[] = [
+  { number: 0, name: 'IO0', altNames: ['GPIO0', 'BOOT', 'ADC2_CH1', 'TOUCH1'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true, notes: 'Boot strapping pin (keep HIGH for normal boot). Also supports touch sensing and ADC2.' },
+  { number: 1, name: 'IO1', altNames: ['GPIO1', 'TX0'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false, notes: 'UART0 TX (USB serial). Avoid repurposing if console is required.' },
+  { number: 2, name: 'IO2', altNames: ['GPIO2', 'ADC2_CH2', 'TOUCH2', 'LED_BUILTIN'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true, notes: 'On-board LED, boot strapping pin.' },
+  { number: 3, name: 'IO3', altNames: ['GPIO3', 'RX0'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false, notes: 'UART0 RX (USB serial).' },
+  { number: 4, name: 'IO4', altNames: ['GPIO4', 'ADC2_CH0', 'TOUCH0'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true },
+  { number: 5, name: 'IO5', altNames: ['GPIO5', 'VSPI_CS'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: false, pwm: true, inputOnly: false, strapping: true, notes: 'Default VSPI CS, boot strapping pin.' },
+  { number: 6, name: 'IO6', altNames: ['GPIO6'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 7, name: 'IO7', altNames: ['GPIO7'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 8, name: 'IO8', altNames: ['GPIO8'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 9, name: 'IO9', altNames: ['GPIO9'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 10, name: 'IO10', altNames: ['GPIO10'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 11, name: 'IO11', altNames: ['GPIO11'], available: false, digitalIn: false, digitalOut: false, analogIn: false, dac: false, touch: false, pwm: false, inputOnly: false, notes: 'Connected to SPI flash—do not use.' },
+  { number: 12, name: 'IO12', altNames: ['GPIO12', 'ADC2_CH5', 'TOUCH5'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true, notes: 'MTDI strapping pin (LOW to enter download mode). Avoid pulling HIGH on reset.' },
+  { number: 13, name: 'IO13', altNames: ['GPIO13', 'ADC2_CH4', 'TOUCH4'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true },
+  { number: 14, name: 'IO14', altNames: ['GPIO14', 'ADC2_CH6', 'TOUCH6'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true },
+  { number: 15, name: 'IO15', altNames: ['GPIO15', 'ADC2_CH3', 'TOUCH3'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false, strapping: true, notes: 'MTDO strapping pin (LOW forces download mode).' },
+  { number: 16, name: 'IO16', altNames: ['GPIO16', 'U2RXD'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false },
+  { number: 17, name: 'IO17', altNames: ['GPIO17', 'U2TXD'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false },
+  { number: 18, name: 'IO18', altNames: ['GPIO18', 'VSPI_CLK'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false },
+  { number: 19, name: 'IO19', altNames: ['GPIO19', 'VSPI_MISO'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false },
+  { number: 21, name: 'IO21', altNames: ['GPIO21', 'SDA'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false, notes: 'Default I2C SDA.' },
+  { number: 22, name: 'IO22', altNames: ['GPIO22', 'SCL'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false, notes: 'Default I2C SCL.' },
+  { number: 23, name: 'IO23', altNames: ['GPIO23', 'VSPI_MOSI'], available: true, digitalIn: true, digitalOut: true, analogIn: false, dac: false, touch: false, pwm: true, inputOnly: false },
+  { number: 25, name: 'IO25', altNames: ['GPIO25', 'DAC1', 'ADC2_CH8'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: true, touch: false, pwm: true, inputOnly: false, notes: 'DAC channel 1.' },
+  { number: 26, name: 'IO26', altNames: ['GPIO26', 'DAC2', 'ADC2_CH9'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: true, touch: false, pwm: true, inputOnly: false, notes: 'DAC channel 2.' },
+  { number: 27, name: 'IO27', altNames: ['GPIO27', 'ADC2_CH7', 'TOUCH7'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false },
+  { number: 32, name: 'IO32', altNames: ['GPIO32', 'ADC1_CH4', 'TOUCH9'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false },
+  { number: 33, name: 'IO33', altNames: ['GPIO33', 'ADC1_CH5', 'TOUCH8'], available: true, digitalIn: true, digitalOut: true, analogIn: true, dac: false, touch: true, pwm: true, inputOnly: false },
+  { number: 34, name: 'IO34', altNames: ['GPIO34', 'ADC1_CH6'], available: true, digitalIn: true, digitalOut: false, analogIn: true, dac: false, touch: false, pwm: false, inputOnly: true, notes: 'Input-only (no output driver).' },
+  { number: 35, name: 'IO35', altNames: ['GPIO35', 'ADC1_CH7'], available: true, digitalIn: true, digitalOut: false, analogIn: true, dac: false, touch: false, pwm: false, inputOnly: true, notes: 'Input-only (no output driver).' },
+  { number: 36, name: 'IO36', altNames: ['GPIO36', 'SVP', 'ADC1_CH0'], available: true, digitalIn: true, digitalOut: false, analogIn: true, dac: false, touch: false, pwm: false, inputOnly: true, notes: 'Sensor VP, input-only.' },
+  { number: 39, name: 'IO39', altNames: ['GPIO39', 'SVN', 'ADC1_CH3'], available: true, digitalIn: true, digitalOut: false, analogIn: true, dac: false, touch: false, pwm: false, inputOnly: true, notes: 'Sensor VN, input-only.' },
+];
+
+const PIN_ALIAS: Record<string, number> = {};
+
+const BASE_PIN_ALIAS: Record<string, number> = {
+  LED_BUILTIN: 2,
+  LED0: 2,
+  TX: 1,
+  TX0: 1,
+  RX: 3,
+  RX0: 3,
+  SDA: 21,
+  SCL: 22,
+  MISO: 19,
+  MOSI: 23,
+  SCK: 18,
+  SS: 5,
+  SPI_CLK: 18,
+  SPI_MISO: 19,
+  SPI_MOSI: 23,
+  SPI_CS: 5,
+};
+
+for (const [key, value] of Object.entries(BASE_PIN_ALIAS)) {
+  PIN_ALIAS[key.toUpperCase()] = value;
+}
+
+for (const spec of DEVKITC_PIN_SPEC) {
+  const baseKey = `GPIO${spec.number}`;
+  PIN_ALIAS[baseKey.toUpperCase()] = spec.number;
+  PIN_ALIAS[`IO${spec.number}`.toUpperCase()] = spec.number;
+  if (spec.altNames) {
+    for (const alt of spec.altNames) {
+      PIN_ALIAS[alt.toUpperCase()] = spec.number;
+    }
+  }
+}
+
+const PIN_SPEC_MAP = new Map<number, PinSpec>(DEVKITC_PIN_SPEC.map((pin) => [pin.number, pin] as const));
+
 const server = new McpServer(
   {
     name: 'mcp-arduino-esp32',
@@ -214,6 +287,60 @@ interface MonitorOptions {
   detectReboot: boolean;
 }
 
+interface PinSpec {
+  number: number;
+  name: string;
+  altNames?: string[];
+  available: boolean;
+  digitalIn: boolean;
+  digitalOut: boolean;
+  analogIn: boolean;
+  dac: boolean;
+  touch: boolean;
+  pwm: boolean;
+  inputOnly: boolean;
+  strapping?: boolean;
+  notes?: string;
+}
+
+interface PinWarning {
+  severity: 'error' | 'warning' | 'info';
+  pin?: number;
+  name?: string;
+  message: string;
+  file?: string;
+  line?: number;
+}
+
+interface PinUsageEntry {
+  kind: 'PIN_MODE' | 'DIGITAL_WRITE' | 'DIGITAL_READ' | 'ANALOG_READ' | 'ANALOG_WRITE' | 'DAC_WRITE' | 'TOUCH_READ';
+  mode?: string;
+  identifier: string;
+  expression: string;
+  file: string;
+  line: number;
+}
+
+interface PinUsageSummary {
+  pin: number;
+  name: string;
+  available: boolean;
+  usage: Array<{
+    kind: PinUsageEntry['kind'];
+    mode?: string;
+    file: string;
+    line: number;
+    identifier: string;
+  }>;
+  spec?: PinSpec;
+}
+
+interface UnknownIdentifier {
+  identifier: string;
+  file: string;
+  line: number;
+}
+
 class InvalidRegexError extends Error {
   constructor(public readonly pattern: string, detail?: string) {
     super(detail ? `Invalid regular expression: ${detail}` : 'Invalid regular expression');
@@ -293,6 +420,11 @@ const monitorStopSchema = z.object({
 const listArtifactsSchema = z.object({
   base_dir: z.string(),
   build_path: z.string().optional(),
+});
+
+const pinCheckSchema = z.object({
+  sketch_path: z.string(),
+  include_headers: z.boolean().optional().default(false),
 });
 
 const pdcaSchema = compileSchema.merge(
@@ -384,6 +516,322 @@ async function resolveSketchPath(sketchPath: string): Promise<string> {
     throw new Error(`Sketch path not found: ${absolute}`);
   }
   return absolute;
+}
+
+const SOURCE_FILE_EXTS = new Set(['.ino', '.pde', '.cpp', '.cc', '.c', '.cxx', '.s', '.S']);
+const HEADER_EXTS = new Set(['.h', '.hh', '.hpp', '.hxx']);
+
+async function collectSourceFiles(root: string, includeHeaders: boolean): Promise<string[]> {
+  const files: string[] = [];
+  async function walk(current: string) {
+    let entries: fsSync.Dirent[];
+    try {
+      entries = await fs.readdir(current, { withFileTypes: true });
+    } catch (error) {
+      return;
+    }
+    for (const entry of entries) {
+      if (entry.name.startsWith('.')) {
+        continue;
+      }
+      if (['node_modules', 'dist', 'build', '.build'].includes(entry.name)) {
+        continue;
+      }
+      const full = path.join(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(full);
+      } else if (entry.isFile()) {
+        const ext = path.extname(entry.name).toLowerCase();
+        if (SOURCE_FILE_EXTS.has(ext) || (includeHeaders && HEADER_EXTS.has(ext))) {
+          files.push(full);
+        }
+      }
+    }
+  }
+  await walk(root);
+  files.sort();
+  return files;
+}
+
+const PIN_MODE_REGEX = /pinMode\s*\(\s*([^,]+?)\s*,\s*(INPUT_PULLUP|INPUT_PULLDOWN|INPUT|OUTPUT|OUTPUT_OPEN_DRAIN)\s*\)/g;
+const DIGITAL_WRITE_REGEX = /digitalWrite\s*\(\s*([^,]+?)\s*,/g;
+const DIGITAL_READ_REGEX = /digitalRead\s*\(\s*([^,]+?)\s*\)/g;
+const ANALOG_READ_REGEX = /analogRead\s*\(\s*([^,]+?)\s*\)/g;
+const ANALOG_WRITE_REGEX = /analogWrite\s*\(\s*([^,]+?)\s*,/g;
+const LEDC_ATTACH_REGEX = /ledcAttachPin\s*\(\s*([^,]+?)\s*,/g;
+const DAC_WRITE_REGEX = /dacWrite\s*\(\s*([^,]+?)\s*,/g;
+const TOUCH_READ_REGEX = /touchRead\s*\(\s*([^,]+?)\s*\)/g;
+
+function computeLineNumber(content: string, index: number): number {
+  let line = 1;
+  for (let i = 0; i < index; i += 1) {
+    if (content.charCodeAt(i) === 10) {
+      line += 1;
+    }
+  }
+  return line;
+}
+
+function resolvePinIdentifier(expression: string): { pin?: number; identifier: string } {
+  const noComments = expression.replace(/\/\*.*?\*\//gs, '').replace(/\/\/.*$/gm, '');
+  let cleaned = noComments.replace(/\s+/g, '');
+  cleaned = cleaned.replace(/^\(+/, '').replace(/\)+$/, '');
+  if (!cleaned) {
+    return { identifier: expression.trim() };
+  }
+  if (/^\d+$/.test(cleaned)) {
+    return { pin: parseInt(cleaned, 10), identifier: cleaned };
+  }
+  let match = cleaned.match(/^GPIO_NUM_(\d+)$/i);
+  if (match) {
+    return { pin: parseInt(match[1], 10), identifier: cleaned };
+  }
+  match = cleaned.match(/^GPIO(\d+)$/i);
+  if (match) {
+    return { pin: parseInt(match[1], 10), identifier: cleaned };
+  }
+  match = cleaned.match(/^IO(\d+)$/i);
+  if (match) {
+    return { pin: parseInt(match[1], 10), identifier: cleaned };
+  }
+  const aliasKey = cleaned.toUpperCase();
+  if (PIN_ALIAS[aliasKey] !== undefined) {
+    return { pin: PIN_ALIAS[aliasKey], identifier: cleaned };
+  }
+  return { identifier: cleaned };
+}
+
+async function analyzePinUsage(sketchPath: string, includeHeaders: boolean) {
+  const files = await collectSourceFiles(sketchPath, includeHeaders);
+  const usageByPin = new Map<number, PinUsageEntry[]>();
+  const unknownIdentifiers = new Map<string, UnknownIdentifier>();
+
+  const recordUsage = (pin: number | undefined, identifier: string, entry: PinUsageEntry) => {
+    if (pin === undefined) {
+      const key = `${identifier}:${entry.file}:${entry.line}`;
+      if (!unknownIdentifiers.has(key)) {
+        unknownIdentifiers.set(key, { identifier, file: entry.file, line: entry.line });
+      }
+      return;
+    }
+    if (!usageByPin.has(pin)) {
+      usageByPin.set(pin, []);
+    }
+    usageByPin.get(pin)!.push(entry);
+  };
+
+  for (const file of files) {
+    let content: string;
+    try {
+      content = await fs.readFile(file, 'utf8');
+    } catch (error) {
+      continue;
+    }
+
+    const processMatches = (regex: RegExp, kind: PinUsageEntry['kind'], mode?: string) => {
+      regex.lastIndex = 0;
+      for (const match of content.matchAll(regex)) {
+        const expr = match[1];
+        const { pin, identifier } = resolvePinIdentifier(expr);
+        const line = computeLineNumber(content, match.index ?? 0);
+        recordUsage(pin, identifier, {
+          kind,
+          mode,
+          identifier,
+          expression: expr,
+          file,
+          line,
+        });
+      }
+    };
+
+    {
+      PIN_MODE_REGEX.lastIndex = 0;
+      for (const match of content.matchAll(PIN_MODE_REGEX)) {
+        const expr = match[1];
+        const mode = match[2];
+        const { pin, identifier } = resolvePinIdentifier(expr);
+        const line = computeLineNumber(content, match.index ?? 0);
+        recordUsage(pin, identifier, {
+          kind: 'PIN_MODE',
+          mode,
+          identifier,
+          expression: expr,
+          file,
+          line,
+        });
+      }
+    }
+
+    processMatches(DIGITAL_WRITE_REGEX, 'DIGITAL_WRITE');
+    processMatches(DIGITAL_READ_REGEX, 'DIGITAL_READ');
+    processMatches(ANALOG_READ_REGEX, 'ANALOG_READ');
+    processMatches(ANALOG_WRITE_REGEX, 'ANALOG_WRITE');
+    processMatches(LEDC_ATTACH_REGEX, 'ANALOG_WRITE');
+    processMatches(DAC_WRITE_REGEX, 'DAC_WRITE');
+    processMatches(TOUCH_READ_REGEX, 'TOUCH_READ');
+  }
+
+  const warnings: PinWarning[] = [];
+  const usageSummary: PinUsageSummary[] = [];
+
+  const addWarning = (warning: PinWarning) => {
+    warnings.push(warning);
+  };
+
+  for (const [pin, entries] of usageByPin.entries()) {
+    const spec = PIN_SPEC_MAP.get(pin);
+    const summary: PinUsageSummary = {
+      pin,
+      name: spec?.name ?? `GPIO${pin}`,
+      available: spec?.available ?? true,
+      usage: entries.map((entry) => ({
+        kind: entry.kind,
+        mode: entry.mode,
+        file: entry.file,
+        line: entry.line,
+        identifier: entry.identifier,
+      })),
+      spec,
+    };
+    usageSummary.push(summary);
+
+    if (!spec) {
+      const example = entries[0];
+      addWarning({
+        severity: 'warning',
+        pin,
+        name: `GPIO${pin}`,
+        message: `GPIO${pin} is not defined for ESP32-DevKitC (check pin numbering).`,
+        file: example.file,
+        line: example.line,
+      });
+      continue;
+    }
+
+    if (!spec.available) {
+      const example = entries[0];
+      addWarning({
+        severity: 'warning',
+        pin,
+        name: spec.name,
+        message: `${spec.name} is reserved (SPI flash). Do not use on ESP32-DevKitC.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    const hasOutput = entries.some((entry) => {
+      if (entry.kind === 'PIN_MODE') {
+        return entry.mode === 'OUTPUT' || entry.mode === 'OUTPUT_OPEN_DRAIN';
+      }
+      return entry.kind === 'DIGITAL_WRITE' || entry.kind === 'ANALOG_WRITE' || entry.kind === 'DAC_WRITE';
+    });
+    const hasInput = entries.some((entry) => {
+      if (entry.kind === 'PIN_MODE') {
+        return entry.mode?.startsWith('INPUT');
+      }
+      return entry.kind === 'DIGITAL_READ' || entry.kind === 'ANALOG_READ' || entry.kind === 'TOUCH_READ';
+    });
+    const hasAnalogRead = entries.some((entry) => entry.kind === 'ANALOG_READ');
+    const hasTouch = entries.some((entry) => entry.kind === 'TOUCH_READ');
+    const hasDac = entries.some((entry) => entry.kind === 'DAC_WRITE');
+
+    if (hasOutput && (!spec.digitalOut || spec.inputOnly)) {
+      const example = entries.find((entry) => entry.kind === 'DIGITAL_WRITE' || entry.kind === 'ANALOG_WRITE' || entry.kind === 'DAC_WRITE' || (entry.kind === 'PIN_MODE' && entry.mode?.startsWith('OUTPUT')))!;
+      addWarning({
+        severity: 'error',
+        pin,
+        name: spec.name,
+        message: `${spec.name} is input-only; using it as OUTPUT may damage the pin.`,
+        file: example.file,
+        line: example.line,
+      });
+    } else if (hasOutput && !spec.digitalOut) {
+      const example = entries.find((entry) => entry.kind === 'DIGITAL_WRITE' || entry.kind === 'ANALOG_WRITE' || entry.kind === 'DAC_WRITE' || (entry.kind === 'PIN_MODE' && entry.mode?.startsWith('OUTPUT')))!;
+      addWarning({
+        severity: 'error',
+        pin,
+        name: spec.name,
+        message: `${spec.name} does not support digital output.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    if (hasInput && !spec.digitalIn) {
+      const example = entries.find((entry) => entry.kind === 'DIGITAL_READ' || (entry.kind === 'PIN_MODE' && entry.mode?.startsWith('INPUT')))!;
+      addWarning({
+        severity: 'warning',
+        pin,
+        name: spec.name,
+        message: `${spec.name} is not intended for digital input.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    if (hasAnalogRead && !spec.analogIn) {
+      const example = entries.find((entry) => entry.kind === 'ANALOG_READ')!;
+      addWarning({
+        severity: 'error',
+        pin,
+        name: spec.name,
+        message: `${spec.name} does not support ADC input.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    if (hasTouch && !spec.touch) {
+      const example = entries.find((entry) => entry.kind === 'TOUCH_READ')!;
+      addWarning({
+        severity: 'warning',
+        pin,
+        name: spec.name,
+        message: `${spec.name} does not support capacitive touch sensing.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    if (hasDac && !spec.dac) {
+      const example = entries.find((entry) => entry.kind === 'DAC_WRITE')!;
+      addWarning({
+        severity: 'error',
+        pin,
+        name: spec.name,
+        message: `${spec.name} does not provide a DAC output.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+
+    if (spec.strapping && hasOutput) {
+      const example = entries.find((entry) => entry.kind === 'DIGITAL_WRITE' || entry.kind === 'ANALOG_WRITE' || entry.kind === 'DAC_WRITE' || (entry.kind === 'PIN_MODE' && entry.mode?.startsWith('OUTPUT')))!;
+      addWarning({
+        severity: 'warning',
+        pin,
+        name: spec.name,
+        message: `${spec.name} is a boot strapping pin. Driving it as OUTPUT may affect boot behaviour.`,
+        file: example.file,
+        line: example.line,
+      });
+    }
+  }
+
+  usageSummary.sort((a, b) => a.pin - b.pin);
+  const warningSummary = warnings.map((warning) => ({ ...warning }));
+  const unknownSummary = Array.from(unknownIdentifiers.values());
+
+  const ok = warnings.every((warning) => warning.severity !== 'error');
+
+  return {
+    ok,
+    warnings: warningSummary,
+    usage: usageSummary,
+    unknownIdentifiers: unknownSummary,
+  };
 }
 
 async function runCompile(args: z.infer<typeof compileSchema>): Promise<CompileSummary> {
@@ -1015,6 +1463,25 @@ server.registerTool('list_artifacts', {
   description: 'List .bin/.elf/.map/.hex artifacts under a build directory',
   inputSchema: listArtifactsSchema.shape,
 }, async (params) => runListArtifacts(listArtifactsSchema.parse(params)));
+
+server.registerTool('pin_spec', {
+  title: 'ESP32-DevKitC Pin Specification',
+  description: 'Return pin capabilities and notes for the ESP32-DevKitC board',
+}, async () => {
+  return toToolResult({ pins: DEVKITC_PIN_SPEC }, 'Loaded ESP32-DevKitC pin specification');
+});
+
+server.registerTool('pin_check', {
+  title: 'Validate Pin Usage',
+  description: 'Analyze a sketch for invalid ESP32-DevKitC pin usage (input-only, strapping, etc.)',
+  inputSchema: pinCheckSchema.shape,
+}, async (params) => {
+  const parsed = pinCheckSchema.parse(params);
+  const sketchPath = await resolveSketchPath(parsed.sketch_path);
+  const analysis = await analyzePinUsage(sketchPath, parsed.include_headers);
+  const message = analysis.ok ? 'No pin conflicts detected.' : 'Pin conflicts or cautions detected. See warnings.';
+  return toToolResult(analysis, message);
+});
 
 server.registerTool('monitor_start', {
   title: 'Start Serial Monitor',
