@@ -118,6 +118,13 @@ interface MonitorOptions {
   detectReboot: boolean;
 }
 
+class InvalidRegexError extends Error {
+  constructor(public readonly pattern: string, detail?: string) {
+    super(detail ? `Invalid regular expression: ${detail}` : 'Invalid regular expression');
+    this.name = 'InvalidRegexError';
+  }
+}
+
 class ArduinoCliRunner {
   constructor(private readonly executable: string) {}
 
@@ -393,6 +400,9 @@ class MonitorSession {
 
   async start() {
     const cliArgs = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${this.options.baud}`];
+    if (this.options.raw) {
+      cliArgs.push('--raw');
+    }
     const child = execa(ARDUINO_CLI, cliArgs, {
       stdout: 'pipe',
       stderr: 'pipe',
@@ -407,7 +417,7 @@ class MonitorSession {
 
     const rl = createInterface({ input: child.stdout });
     rl.on('line', (rawLine) => {
-      const line = stripAnsi(rawLine);
+      const line = this.options.raw ? rawLine : stripAnsi(rawLine);
       this.lastLine = line;
       this.lines += 1;
       if (this.options.detectReboot && REBOOT_PATTERNS.some((pattern) => pattern.test(line))) {
@@ -434,7 +444,7 @@ class MonitorSession {
     if (child.stderr) {
       const errRl = createInterface({ input: child.stderr });
       errRl.on('line', (rawLine) => {
-        const line = stripAnsi(rawLine);
+        const line = this.options.raw ? rawLine : stripAnsi(rawLine);
         safeNotify('event/serial', {
           token: this.token,
           port: this.options.port,
@@ -447,6 +457,9 @@ class MonitorSession {
 
     child.on('close', (code) => {
       this.exitCode = code === null ? undefined : code;
+      if (code !== 0 && this.stopReason === 'completed') {
+        this.stopReason = 'error';
+      }
       this.finalize();
     });
 
@@ -505,7 +518,8 @@ class MonitorSession {
     for (const resolve of this.completionResolvers) {
       resolve(summary);
     }
-    safeNotify('event/serial_end', summary as unknown as Record<string, unknown>).catch(() => undefined);
+    const payload: Record<string, unknown> = { ...summary };
+    safeNotify('event/serial_end', payload).catch(() => undefined);
   }
 }
 
@@ -514,6 +528,15 @@ class MonitorManager {
 
   async start(options: z.infer<typeof monitorStartSchema>): Promise<MonitorSession> {
     const token = randomUUID();
+    let stopRegex: RegExp | undefined;
+    if (options.stop_on) {
+      try {
+        stopRegex = new RegExp(options.stop_on);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        throw new InvalidRegexError(options.stop_on, detail);
+      }
+    }
     const session = new MonitorSession(
       {
         port: options.port,
@@ -521,7 +544,7 @@ class MonitorManager {
         raw: options.raw,
         maxSeconds: options.max_seconds,
         maxLines: options.max_lines,
-        stopRegex: options.stop_on ? new RegExp(options.stop_on) : undefined,
+        stopRegex,
         detectReboot: options.detect_reboot,
       },
       token,
@@ -727,11 +750,27 @@ server.registerTool('monitor_start', {
   description: 'Start streaming serial output with stop conditions',
   inputSchema: monitorStartSchema.shape,
 }, async (params) => {
-  const parsed = monitorStartSchema.parse(params);
-  const session = await monitorManager.start(parsed);
-  const summaryPromise = session.onComplete();
-  summaryPromise.catch(() => undefined);
-  return toToolResult({ ok: true, token: session.token, port: parsed.port }, `Monitor started with token ${session.token}`);
+  try {
+    const parsed = monitorStartSchema.parse(params);
+    const session = await monitorManager.start(parsed);
+    const summaryPromise = session.onComplete();
+    summaryPromise.catch(() => undefined);
+    return toToolResult({ ok: true, token: session.token, port: parsed.port }, `Monitor started with token ${session.token}`);
+  } catch (error) {
+    if (error instanceof InvalidRegexError) {
+      return toToolResult(
+        {
+          ok: false,
+          error: 'invalid_stop_regex',
+          pattern: error.pattern,
+          message: error.message,
+        },
+        `Invalid stop_on regex: ${error.pattern}`,
+      );
+    }
+    const message = error instanceof Error ? error.message : String(error);
+    return toToolResult({ ok: false, error: message }, message);
+  }
 });
 
 server.registerTool('monitor_stop', {
