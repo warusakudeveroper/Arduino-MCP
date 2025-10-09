@@ -97,6 +97,7 @@ interface UploadSummary {
 interface MonitorSummary {
   token: string;
   port: string;
+  baud: number;
   startTime: string;
   endTime: string;
   elapsedSeconds: number;
@@ -111,6 +112,7 @@ interface MonitorSummary {
 interface MonitorOptions {
   port: string;
   baud: number;
+  autoBaud: boolean;
   raw: boolean;
   maxSeconds: number;
   maxLines: number;
@@ -181,6 +183,7 @@ const uploadSchema = z.object({
 const monitorStartSchema = z.object({
   port: z.string(),
   baud: z.number().int().positive().optional().default(115200),
+  auto_baud: z.boolean().optional().default(false),
   raw: z.boolean().optional().default(false),
   max_seconds: z.number().nonnegative().optional().default(0),
   max_lines: z.number().int().nonnegative().optional().default(0),
@@ -387,19 +390,54 @@ class MonitorSession {
   private rebootDetected = false;
   private exitCode?: number;
   private stopReason = 'completed';
+  private readonly autoBaudEnabled: boolean;
+  private selectedBaud: number;
 
   constructor(private readonly options: MonitorOptions, readonly token: string) {
     this.completionPromise = new Promise((resolve) => {
       this.completionResolvers.push(resolve);
     });
+    this.autoBaudEnabled = options.autoBaud;
+    this.selectedBaud = options.baud;
   }
 
   get port(): string {
     return this.options.port;
   }
 
+  get baud(): number {
+    return this.selectedBaud;
+  }
+
   async start() {
-    const cliArgs = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${this.options.baud}`];
+    if (this.autoBaudEnabled) {
+      const detection = await this.detectBaudRate();
+      if (detection && detection.baud !== this.selectedBaud) {
+        this.selectedBaud = detection.baud;
+        await safeNotify('event/serial', {
+          token: this.token,
+          port: this.options.port,
+          line: `[monitor] auto-baud selected ${detection.baud} (score ${detection.score.toFixed(2)})`,
+          preview: detection.preview,
+          timestamp: new Date().toISOString(),
+          lineNumber: 0,
+          raw: false,
+          baud: detection.baud,
+        });
+      } else if (!detection) {
+        await safeNotify('event/serial', {
+          token: this.token,
+          port: this.options.port,
+          line: `[monitor] auto-baud fallback to ${this.selectedBaud}`,
+          timestamp: new Date().toISOString(),
+          lineNumber: 0,
+          raw: false,
+          baud: this.selectedBaud,
+        });
+      }
+    }
+
+    const cliArgs = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${this.selectedBaud}`];
     if (this.options.raw) {
       cliArgs.push('--raw');
     }
@@ -430,6 +468,7 @@ class MonitorSession {
         raw: this.options.raw,
         timestamp: new Date().toISOString(),
         lineNumber: this.lines,
+        baud: this.selectedBaud,
       }).catch(() => undefined);
 
       if (this.options.stopRegex && this.options.stopRegex.test(line)) {
@@ -451,6 +490,7 @@ class MonitorSession {
           line,
           stream: 'stderr',
           timestamp: new Date().toISOString(),
+          baud: this.selectedBaud,
         }).catch(() => undefined);
       });
     }
@@ -474,6 +514,124 @@ class MonitorSession {
         this.stop().catch(() => undefined);
       }, this.options.maxSeconds * 1000);
     }
+  }
+
+  private async detectBaudRate(): Promise<{ baud: number; score: number; preview: string } | null> {
+    const candidates: number[] = [];
+    const pushCandidate = (value: number) => {
+      if (!Number.isFinite(value) || value <= 0) {
+        return;
+      }
+      if (!candidates.includes(value)) {
+        candidates.push(value);
+      }
+    };
+
+    pushCandidate(this.selectedBaud);
+    pushCandidate(115200);
+    pushCandidate(74880);
+    pushCandidate(57600);
+    pushCandidate(9600);
+
+    let bestBaud: number | undefined;
+    let bestScore = 0;
+    let bestSample = '';
+
+    for (const candidate of candidates) {
+      const result = await this.probeBaudRate(candidate);
+      if (result.score > bestScore) {
+        bestScore = result.score;
+        bestBaud = candidate;
+        bestSample = result.sample;
+      }
+      if (bestScore >= 0.8) {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 150));
+    }
+
+    if (bestBaud === undefined || bestScore < 0.3) {
+      return null;
+    }
+
+    const preview = this.previewSample(bestSample);
+    return { baud: bestBaud, score: bestScore, preview };
+  }
+
+  private async probeBaudRate(baud: number): Promise<{ sample: string; score: number }> {
+    const args = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${baud}`];
+    let sample = '';
+    try {
+      const child = execa(ARDUINO_CLI, args, {
+        stdout: 'pipe',
+        stderr: 'pipe',
+        reject: false,
+      });
+
+      const onData = (chunk: Buffer) => {
+        if (sample.length < 4096) {
+          sample += chunk.toString('utf8');
+        }
+        if (sample.length >= 4096) {
+          child.kill('SIGINT', { forceKillAfterTimeout: 200 });
+        }
+      };
+
+      child.stdout?.on('data', onData);
+      const timer = setTimeout(() => child.kill('SIGINT', { forceKillAfterTimeout: 500 }), 1800);
+      await child.catch(() => undefined);
+      clearTimeout(timer);
+      child.stdout?.off('data', onData);
+    } catch (error) {
+      // ignore errors and treat as no signal
+    }
+
+    const score = this.scoreSample(sample);
+    return { sample, score };
+  }
+
+  private scoreSample(sample: string): number {
+    if (!sample) {
+      return 0;
+    }
+    const printable = Array.from(sample)
+      .filter((char) => {
+        const code = char.charCodeAt(0);
+        return code >= 0x20 || char === '\n' || char === '\r' || char === '\t';
+      })
+      .join('');
+    if (!printable.trim()) {
+      return 0;
+    }
+    const ratio = printable.length / sample.length;
+    const newlineCount = (printable.match(/\n/g) ?? []).length;
+    const keywordMatch = /rst:0x|wifi|rssi|http|webhook|esp32|guru|connecting|ip:/i.test(printable) ? 1 : 0;
+    const score = ratio * 0.6 + Math.min(newlineCount, 10) / 10 * 0.25 + keywordMatch * 0.15;
+    return Math.max(0, Math.min(1, score));
+  }
+
+  private previewSample(sample: string): string {
+    if (!sample) {
+      return '';
+    }
+    const sanitized = Array.from(sample)
+      .map((char) => {
+        const code = char.charCodeAt(0);
+        if (char === '\r' || char === '\t') {
+          return ' ';
+        }
+        if (code < 0x20 || code === 0x7f) {
+          return '';
+        }
+        return char;
+      })
+      .join('')
+      .replace(/\s+/g, ' ')
+      .trim();
+    if (!sanitized) {
+      return '';
+    }
+    return sanitized.length > 80 ? `${sanitized.slice(0, 80)}…` : sanitized;
   }
 
   async stop(): Promise<MonitorSummary> {
@@ -505,6 +663,7 @@ class MonitorSession {
     const summary: MonitorSummary = {
       token: this.token,
       port: this.options.port,
+      baud: this.selectedBaud,
       startTime: this.startHr.toISOString(),
       endTime: end.toISOString(),
       elapsedSeconds: Math.max(0, (end.getTime() - this.startHr.getTime()) / 1000),
@@ -541,6 +700,7 @@ class MonitorManager {
       {
         port: options.port,
         baud: options.baud,
+        autoBaud: options.auto_baud,
         raw: options.raw,
         maxSeconds: options.max_seconds,
         maxLines: options.max_lines,
@@ -674,6 +834,7 @@ async function runPdca(args: z.infer<typeof pdcaSchema>) {
     {
       port: args.port,
       baud: args.baud,
+      autoBaud: false,
       raw: false,
       maxSeconds: args.monitor_seconds,
       maxLines: 0,
@@ -755,7 +916,19 @@ server.registerTool('monitor_start', {
     const session = await monitorManager.start(parsed);
     const summaryPromise = session.onComplete();
     summaryPromise.catch(() => undefined);
-    return toToolResult({ ok: true, token: session.token, port: parsed.port }, `Monitor started with token ${session.token}`);
+    const message = parsed.auto_baud
+      ? `Monitor started with token ${session.token} (baud ${session.baud})`
+      : `Monitor started with token ${session.token}`;
+    return toToolResult(
+      {
+        ok: true,
+        token: session.token,
+        port: parsed.port,
+        baud: session.baud,
+        auto_baud: parsed.auto_baud,
+      },
+      message,
+    );
   } catch (error) {
     if (error instanceof InvalidRegexError) {
       return toToolResult(
