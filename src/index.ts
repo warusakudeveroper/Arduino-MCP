@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs/promises';
+import fsSync from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
 import { createInterface } from 'node:readline';
@@ -11,7 +12,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
-import pkg from '../package.json' assert { type: 'json' };
+import pkg from '../package.json' with { type: 'json' };
 
 const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS. Tools provided:
 - version: show arduino-cli version (JSON when available)
@@ -36,6 +37,99 @@ const REBOOT_PATTERNS = [
   /Guru Meditation Error/i,
   /CPU halted/i,
 ];
+
+const PYTHON = (() => {
+  const userSpecified = process.env.MCP_PYTHON;
+  if (userSpecified) {
+    return userSpecified;
+  }
+  const venvPython = path.resolve(process.cwd(), '.venv/bin/python');
+  if (fsSync.existsSync(venvPython)) {
+    return venvPython;
+  }
+  return 'python3';
+})();
+
+const SERIAL_PROBE_SCRIPT = `import sys, time
+try:
+    import serial
+except ImportError:
+    sys.exit(0)
+
+port = sys.argv[1]
+baud = int(sys.argv[2])
+duration = float(sys.argv[3])
+
+try:
+    ser = serial.Serial(port, baudrate=baud, timeout=0.05)
+except Exception:
+    sys.exit(0)
+
+try:
+    try:
+        ser.dtr = False
+        ser.rts = False
+        time.sleep(0.05)
+        ser.dtr = True
+        ser.rts = True
+    except Exception:
+        pass
+    time.sleep(0.05)
+    end_time = time.time() + duration
+    buf = bytearray()
+    while time.time() < end_time:
+        data = ser.read(256)
+        if data:
+            buf.extend(data)
+    sys.stdout.buffer.write(buf)
+finally:
+    ser.close()
+`;
+
+const SERIAL_MONITOR_SCRIPT = `import sys, time
+try:
+    import serial
+except ImportError:
+    sys.exit(1)
+
+port = sys.argv[1]
+baud = int(sys.argv[2])
+raw = sys.argv[3] == '1'
+
+try:
+    ser = serial.Serial(port, baudrate=baud, timeout=0.05)
+except Exception as exc:
+    sys.stderr.write(str(exc))
+    sys.exit(1)
+
+try:
+    try:
+        ser.dtr = False
+        ser.rts = False
+        time.sleep(0.05)
+        ser.dtr = True
+        ser.rts = True
+    except Exception:
+        pass
+    time.sleep(0.05)
+    if raw:
+        while True:
+            data = ser.read(256)
+            if data:
+                sys.stdout.buffer.write(data)
+                sys.stdout.flush()
+    else:
+        while True:
+            line = ser.readline()
+            if line:
+                try:
+                    sys.stdout.write(line.decode('utf-8', errors='replace'))
+                except Exception:
+                    sys.stdout.write(line.decode('latin-1', errors='replace'))
+                sys.stdout.flush()
+finally:
+    ser.close()
+`;
 
 const server = new McpServer(
   {
@@ -410,6 +504,7 @@ class MonitorSession {
   }
 
   async start() {
+    await this.pulseReset();
     if (this.autoBaudEnabled) {
       const detection = await this.detectBaudRate();
       if (detection && detection.baud !== this.selectedBaud) {
@@ -437,11 +532,9 @@ class MonitorSession {
       }
     }
 
-    const cliArgs = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${this.selectedBaud}`];
-    if (this.options.raw) {
-      cliArgs.push('--raw');
-    }
-    const child = execa(ARDUINO_CLI, cliArgs, {
+    await this.pulseReset();
+    const child = execa(PYTHON, ['-', this.options.port, String(this.selectedBaud), this.options.raw ? '1' : '0'], {
+      input: SERIAL_MONITOR_SCRIPT,
       stdout: 'pipe',
       stderr: 'pipe',
       reject: false,
@@ -453,47 +546,62 @@ class MonitorSession {
       throw new Error('Failed to attach to monitor stdout.');
     }
 
-    const rl = createInterface({ input: child.stdout });
-    rl.on('line', (rawLine) => {
-      const line = this.options.raw ? rawLine : stripAnsi(rawLine);
-      this.lastLine = line;
-      this.lines += 1;
-      if (this.options.detectReboot && REBOOT_PATTERNS.some((pattern) => pattern.test(line))) {
-        this.rebootDetected = true;
-      }
-      safeNotify('event/serial', {
-        token: this.token,
-        port: this.options.port,
-        line,
-        raw: this.options.raw,
-        timestamp: new Date().toISOString(),
-        lineNumber: this.lines,
-        baud: this.selectedBaud,
-      }).catch(() => undefined);
-
-      if (this.options.stopRegex && this.options.stopRegex.test(line)) {
-        this.stopReason = 'pattern_match';
-        this.stop().catch(() => undefined);
-      } else if (this.options.maxLines > 0 && this.lines >= this.options.maxLines) {
-        this.stopReason = 'line_limit';
-        this.stop().catch(() => undefined);
-      }
-    });
-
-    if (child.stderr) {
-      const errRl = createInterface({ input: child.stderr });
-      errRl.on('line', (rawLine) => {
-        const line = this.options.raw ? rawLine : stripAnsi(rawLine);
+    if (this.options.raw) {
+      child.stdout.on('data', (chunk: Buffer) => {
+        const line = chunk.toString('base64');
+        this.lastLine = line;
+        this.lines += 1;
         safeNotify('event/serial', {
           token: this.token,
           port: this.options.port,
           line,
-          stream: 'stderr',
+          raw: true,
+          encoding: 'base64',
           timestamp: new Date().toISOString(),
+          lineNumber: this.lines,
           baud: this.selectedBaud,
         }).catch(() => undefined);
       });
+    } else {
+      const rl = createInterface({ input: child.stdout });
+      rl.on('line', (rawLine) => {
+        const line = stripAnsi(rawLine);
+        this.lastLine = line;
+        this.lines += 1;
+        if (this.options.detectReboot && REBOOT_PATTERNS.some((pattern) => pattern.test(line))) {
+          this.rebootDetected = true;
+        }
+        safeNotify('event/serial', {
+          token: this.token,
+          port: this.options.port,
+          line,
+          raw: false,
+          timestamp: new Date().toISOString(),
+          lineNumber: this.lines,
+          baud: this.selectedBaud,
+        }).catch(() => undefined);
+
+        if (this.options.stopRegex && this.options.stopRegex.test(line)) {
+          this.stopReason = 'pattern_match';
+          this.stop().catch(() => undefined);
+        } else if (this.options.maxLines > 0 && this.lines >= this.options.maxLines) {
+          this.stopReason = 'line_limit';
+          this.stop().catch(() => undefined);
+        }
+      });
     }
+
+    child.stderr?.on('data', (chunk: Buffer) => {
+      const line = chunk.toString('utf8');
+      safeNotify('event/serial', {
+        token: this.token,
+        port: this.options.port,
+        line,
+        stream: 'stderr',
+        timestamp: new Date().toISOString(),
+        baud: this.selectedBaud,
+      }).catch(() => undefined);
+    });
 
     child.on('close', (code) => {
       this.exitCode = code === null ? undefined : code;
@@ -559,31 +667,20 @@ class MonitorSession {
   }
 
   private async probeBaudRate(baud: number): Promise<{ sample: string; score: number }> {
-    const args = ['monitor', '--quiet', '--port', this.options.port, '--config', `baudrate=${baud}`];
     let sample = '';
     try {
-      const child = execa(ARDUINO_CLI, args, {
+      const { stdout } = await execa(PYTHON, ['-', this.options.port, String(baud), '1.8'], {
+        input: SERIAL_PROBE_SCRIPT,
+        encoding: 'buffer',
         stdout: 'pipe',
-        stderr: 'pipe',
+        stderr: 'ignore',
         reject: false,
       });
-
-      const onData = (chunk: Buffer) => {
-        if (sample.length < 4096) {
-          sample += chunk.toString('utf8');
-        }
-        if (sample.length >= 4096) {
-          child.kill('SIGINT', { forceKillAfterTimeout: 200 });
-        }
-      };
-
-      child.stdout?.on('data', onData);
-      const timer = setTimeout(() => child.kill('SIGINT', { forceKillAfterTimeout: 500 }), 1800);
-      await child.catch(() => undefined);
-      clearTimeout(timer);
-      child.stdout?.off('data', onData);
+      sample = stdout ? stdout.toString('utf8') : '';
     } catch (error) {
-      // ignore errors and treat as no signal
+      if (error && typeof error === 'object' && 'stdout' in error && error.stdout) {
+        sample = (error as { stdout: Buffer }).stdout.toString('utf8');
+      }
     }
 
     const score = this.scoreSample(sample);
@@ -632,6 +729,19 @@ class MonitorSession {
       return '';
     }
     return sanitized.length > 80 ? `${sanitized.slice(0, 80)}…` : sanitized;
+  }
+
+  private async pulseReset() {
+    const resetScript = `import serial, time\ntry:\n    ser = serial.Serial(r"${this.options.port}", baudrate=${this.selectedBaud}, timeout=0.1)\n    ser.dtr = False\n    ser.rts = False\n    time.sleep(0.05)\n    ser.dtr = True\n    ser.rts = True\n    time.sleep(0.05)\n    ser.close()\nexcept Exception:\n    pass\n`;
+    try {
+      await execa(PYTHON, ['-'], {
+        input: resetScript,
+        stdout: 'ignore',
+        stderr: 'ignore',
+      });
+    } catch (error) {
+      // ignore reset failures and proceed
+    }
   }
 
   async stop(): Promise<MonitorSummary> {
