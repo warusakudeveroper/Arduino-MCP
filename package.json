@@ -1,0 +1,29 @@
+{
+  "name": "arduino-mcp",
+  "version": "0.1.0",
+  "description": "Arduino MCP Server - Model Context Protocol implementation for Arduino development",
+  "main": "index.js",
+  "scripts": {
+    "dev": "node index.js",
+    "start": "node index.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "arduino",
+    "mcp",
+    "model-context-protocol",
+    "serial",
+    "automation"
+  ],
+  "author": "warusakudeveroper",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/warusakudeveroper/Arduino-MCP.git"
+  },
+  "bugs": {
+    "url": "https://github.com/warusakudeveroper/Arduino-MCP/issues"
+  },
+  "homepage": "https://github.com/warusakudeveroper/Arduino-MCP#readme"
+}
+
