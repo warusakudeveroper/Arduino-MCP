@@ -83,7 +83,26 @@ interface WorkspaceConfig {
   defaultFqbn: string;
   defaultBaud: number;
   additionalBuildDirs: string[];
+  portNicknames: Record<string, string>;  // ポートID -> ニックネーム
 }
+
+// インストールログエントリ
+interface InstallLogEntry {
+  lacisID: string;
+  RegisterStatus: string;
+  cic: string;
+  mainssid: string;
+  mainpass: string;
+  altssid: string;
+  altpass: string;
+  devssid: string;
+  devpass: string;
+  note: string;
+  port: string;
+  nickname?: string;
+}
+
+const INSTALL_LOG_FILE = path.join(CONFIG_DIR, 'installlog.json');
 
 const DEFAULT_CONFIG: WorkspaceConfig = {
   buildOutputDir: BUILDS_DIR,
@@ -92,6 +111,7 @@ const DEFAULT_CONFIG: WorkspaceConfig = {
   defaultFqbn: 'esp32:esp32:esp32',
   defaultBaud: 115200,
   additionalBuildDirs: [],
+  portNicknames: {},
 };
 
 let workspaceConfig: WorkspaceConfig = { ...DEFAULT_CONFIG };
@@ -113,6 +133,105 @@ async function saveWorkspaceConfig(config: Partial<WorkspaceConfig>): Promise<vo
   workspaceConfig = { ...workspaceConfig, ...config };
   await ensureDirectory(CONFIG_DIR);
   await fs.writeFile(CONFIG_FILE, JSON.stringify(workspaceConfig, null, 2));
+}
+
+// ポートニックネーム管理
+function getPortNickname(port: string): string | undefined {
+  return workspaceConfig.portNicknames[port];
+}
+
+async function setPortNickname(port: string, nickname: string): Promise<void> {
+  workspaceConfig.portNicknames[port] = nickname;
+  await saveWorkspaceConfig({ portNicknames: workspaceConfig.portNicknames });
+}
+
+// インストールログ管理
+let installLogCache: Record<string, InstallLogEntry> = {};
+
+async function loadInstallLog(): Promise<Record<string, InstallLogEntry>> {
+  try {
+    if (await pathExists(INSTALL_LOG_FILE)) {
+      const content = await fs.readFile(INSTALL_LOG_FILE, 'utf-8');
+      installLogCache = JSON.parse(content);
+    }
+  } catch (e) {
+    installLogCache = {};
+  }
+  return installLogCache;
+}
+
+async function saveInstallLog(): Promise<void> {
+  await ensureDirectory(CONFIG_DIR);
+  await fs.writeFile(INSTALL_LOG_FILE, JSON.stringify(installLogCache, null, 2));
+}
+
+async function addInstallLogEntry(port: string, entry: Partial<InstallLogEntry>): Promise<string> {
+  await loadInstallLog();
+  const now = new Date();
+  const timestamp = now.toISOString().replace(/[-:T]/g, '').slice(0, 14); // YYYYMMDDHHmmss
+  const portId = port.replace(/[^a-zA-Z0-9]/g, '_');
+  const key = `${timestamp}_${portId}`;
+  
+  installLogCache[key] = {
+    lacisID: entry.lacisID || '',
+    RegisterStatus: entry.RegisterStatus || '',
+    cic: entry.cic || '',
+    mainssid: entry.mainssid || '',
+    mainpass: entry.mainpass || '',
+    altssid: entry.altssid || '',
+    altpass: entry.altpass || '',
+    devssid: entry.devssid || '',
+    devpass: entry.devpass || '',
+    note: entry.note || '',
+    port,
+    nickname: getPortNickname(port),
+  };
+  
+  await saveInstallLog();
+  return key;
+}
+
+// ::RegisteredInfo:: パターンを検出してパース
+function parseRegisteredInfo(line: string): Partial<InstallLogEntry> | null {
+  const match = line.match(/::RegisteredInfo::\s*\[([^\]]*)\]/);
+  if (!match) return null;
+  
+  const content = match[1];
+  const result: Partial<InstallLogEntry> = {};
+  
+  // "LacisID:12345678901234567890","RegisterStatus:Registered",... の形式をパース
+  const pairs = content.split(',').map(s => s.trim().replace(/^"|"$/g, ''));
+  for (const pair of pairs) {
+    const colonIdx = pair.indexOf(':');
+    if (colonIdx > 0) {
+      const key = pair.slice(0, colonIdx).toLowerCase();
+      const value = pair.slice(colonIdx + 1);
+      
+      switch (key) {
+        case 'lacisid': result.lacisID = value; break;
+        case 'registerstatus': result.RegisterStatus = value; break;
+        case 'cic': result.cic = value; break;
+        case 'mainssid': result.mainssid = value; break;
+        case 'mainpass': result.mainpass = value; break;
+        case 'altssid': result.altssid = value; break;
+        case 'altpass': result.altpass = value; break;
+        case 'devssid': result.devssid = value; break;
+        case 'devpass': result.devpass = value; break;
+      }
+    }
+  }
+  
+  return Object.keys(result).length > 0 ? result : null;
+}
+
+// 最新のインストールログを取得
+async function getRecentInstallLogs(limit: number = 5): Promise<Array<{ key: string; entry: InstallLogEntry }>> {
+  await loadInstallLog();
+  const entries = Object.entries(installLogCache)
+    .map(([key, entry]) => ({ key, entry }))
+    .sort((a, b) => b.key.localeCompare(a.key)) // 新しい順
+    .slice(0, limit);
+  return entries;
 }
 
 async function setupWorkspace(): Promise<{ created: string[]; existing: string[] }> {
@@ -782,7 +901,7 @@ interface DependencyReport {
 }
 
 interface SerialEventPayload {
-  type: 'serial' | 'serial_end';
+  type: 'serial' | 'serial_end' | 'install_log';
   token?: string;
   port?: string;
   line?: string;
@@ -797,6 +916,9 @@ interface SerialEventPayload {
   rebootDetected?: boolean;
   lastLine?: string;
   exitCode?: number;
+  // For install_log events
+  key?: string;
+  entry?: Partial<InstallLogEntry>;
 }
 
 function timestampSlug(date = new Date()): string {
@@ -1393,6 +1515,19 @@ const CONSOLE_HTML = `<!DOCTYPE html>
         </div>
       </div>
 
+      <!-- Install Log Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📋 Install Log</div>
+          <button class="sm outline" id="installLogHistoryBtn" title="全履歴を表示">📜 History</button>
+        </div>
+        <div class="panel-body" id="installLogPanel" style="max-height: 250px;">
+          <div class="empty-state" style="padding: 20px;">
+            <p>::RegisteredInfo:: を待機中...</p>
+          </div>
+        </div>
+      </div>
+
       <!-- Firmware Upload Panel -->
       <div class="panel">
         <div class="panel-header">
@@ -1754,6 +1889,105 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3000);
     }
     
+    // Port nickname management
+    async function setPortNickname(port, nickname) {
+      try {
+        await fetch('/api/port-nicknames', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port, nickname })
+        });
+        showToast('ニックネームを保存: ' + nickname, 'success');
+      } catch (err) {
+        console.error('Failed to set nickname:', err);
+        showToast('ニックネーム保存失敗', 'error');
+      }
+    }
+    
+    // Install log management
+    let installLogs = [];
+    
+    async function loadInstallLogs() {
+      try {
+        const resp = await fetch('/api/install-logs?limit=50');
+        const data = await resp.json();
+        installLogs = data.logs || [];
+        renderInstallLogs();
+      } catch (err) {
+        console.error('Failed to load install logs:', err);
+      }
+    }
+    
+    function formatInstallLogEntry(key, entry) {
+      // Parse key: YYYYMMDDHHmmss_portId
+      const dateStr = key.slice(0, 14);
+      const year = dateStr.slice(0, 4);
+      const month = dateStr.slice(4, 6);
+      const day = dateStr.slice(6, 8);
+      const hour = dateStr.slice(8, 10);
+      const min = dateStr.slice(10, 12);
+      const sec = dateStr.slice(12, 14);
+      const timeDisplay = year.slice(2) + '/' + month + '/' + day + ' ' + hour + ':' + min + ':' + sec;
+      
+      const lacisId = entry.lacisID || '---';
+      const cic = entry.cic || '---';
+      const nickname = entry.nickname || entry.port?.split('/').pop() || '---';
+      
+      let wifiInfo = '';
+      if (entry.mainssid) wifiInfo += '1:' + entry.mainssid;
+      if (entry.altssid) wifiInfo += (wifiInfo ? ',' : '') + '2:' + entry.altssid;
+      if (entry.devssid) wifiInfo += (wifiInfo ? ',' : '') + '3:' + entry.devssid;
+      
+      return \`
+        <div class="install-log-entry" style="padding:8px;border-bottom:1px solid var(--border);font-size:12px;">
+          <div style="color:var(--text-muted);margin-bottom:2px;">\${timeDisplay} <span style="color:var(--accent);">[\${escapeHtml(nickname)}]</span></div>
+          <div style="font-family:monospace;color:var(--text);">
+            <span style="color:#22c55e;">\${escapeHtml(lacisId)}</span>
+            <span style="color:var(--text-muted);">(cic:\${escapeHtml(cic)})</span>
+          </div>
+          \${wifiInfo ? '<div style="color:var(--text-muted);font-size:11px;">wifi: ' + escapeHtml(wifiInfo) + '</div>' : ''}
+        </div>
+      \`;
+    }
+    
+    function renderInstallLogs() {
+      const panel = document.getElementById('installLogPanel');
+      if (installLogs.length === 0) {
+        panel.innerHTML = '<div class="empty-state" style="padding:20px;"><p>::RegisteredInfo:: を待機中...</p></div>';
+        return;
+      }
+      panel.innerHTML = installLogs.slice(0, 5).map(({ key, entry }) => formatInstallLogEntry(key, entry)).join('');
+    }
+    
+    function showInstallLogHistory() {
+      const overlay = document.createElement('div');
+      overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.7);display:flex;align-items:center;justify-content:center;z-index:2000;';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      
+      const content = installLogs.map(({ key, entry }) => formatInstallLogEntry(key, entry)).join('');
+      
+      overlay.innerHTML = \`
+        <div style="background:var(--bg-panel);border:1px solid var(--border);border-radius:12px;max-width:600px;width:90%;max-height:80vh;overflow:hidden;display:flex;flex-direction:column;">
+          <div style="padding:16px 20px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center;">
+            <span style="font-size:18px;font-weight:600;">📋 Install Log History (\${installLogs.length})</span>
+            <button onclick="this.closest('div').parentElement.remove()" style="background:none;border:none;color:var(--text-muted);font-size:24px;cursor:pointer;">×</button>
+          </div>
+          <div style="overflow-y:auto;flex:1;">
+            \${content || '<div class="empty-state" style="padding:40px;"><p>ログがありません</p></div>'}
+          </div>
+        </div>
+      \`;
+      document.body.appendChild(overlay);
+    }
+    
+    // Listen for install_log events from SSE
+    function handleInstallLogEvent(data) {
+      if (data.type === 'install_log') {
+        loadInstallLogs(); // Reload to get latest
+        showToast('📋 RegisteredInfo detected: ' + (data.entry?.lacisID || 'unknown'), 'success');
+      }
+    }
+    
     // Fetch active monitors from server
     async function fetchActiveMonitors() {
       try {
@@ -1784,15 +2018,22 @@ const CONSOLE_HTML = `<!DOCTYPE html>
         if (data.ports && data.ports.length > 0) {
           availablePorts.innerHTML = data.ports.map(p => {
             const isMonitoring = monitoringPorts.has(p.port);
+            const nickname = p.nickname || '';
             return \`
             <div class="port-list-item \${isMonitoring ? 'monitoring' : ''}">
-              <div class="port-info">
-                <div class="port-name">
-                  \${isMonitoring ? '🟢' : '⚪'} \${escapeHtml(p.port)}
+              <div class="port-info" style="flex:1">
+                <div class="port-name" style="display:flex; align-items:center; gap:6px;">
+                  \${isMonitoring ? '🟢' : '⚪'} 
+                  <input type="text" class="port-nickname" 
+                         value="\${escapeHtml(nickname)}" 
+                         placeholder="\${escapeHtml(p.port.split('/').pop())}"
+                         onchange="setPortNickname('\${escapeHtml(p.port)}', this.value)"
+                         title="ニックネームを設定（例：ESP32-1）"
+                         style="width:80px;padding:2px 4px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg-input);color:var(--text);">
+                  <span style="color:var(--text-muted);font-size:10px;">\${escapeHtml(p.port.split('/').pop())}</span>
                 </div>
                 <div class="port-detail">
                   \${p.isEsp32 ? '✓ ESP32' : ''} 
-                  \${p.label || ''} 
                   \${isMonitoring ? '<span style="color:#22c55e;">● Monitoring</span>' : ''}
                 </div>
               </div>
@@ -1947,6 +2188,8 @@ const CONSOLE_HTML = `<!DOCTYPE html>
             const port = data.port;
             monitoringPorts.delete(port);
             appendLog({ ...data, line: '<Monitor ended: ' + (data.reason || 'unknown') + '>' });
+          } else if (data.type === 'install_log') {
+            handleInstallLogEvent(data);
           }
         } catch (e) { /* ignore */ }
       };
@@ -2128,10 +2371,14 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       }
     }, 5000);
     
+    // Install log history button
+    document.getElementById('installLogHistoryBtn').onclick = showInstallLogHistory;
+    
     // Initial load
     connect();
     scanPorts();
     scanArtifacts();
+    loadInstallLogs();
   </script>
 </body>
 </html>`;
@@ -2237,12 +2484,68 @@ class ConsoleServer {
       return;
     }
 
+    // API: Get/Set port nicknames
+    if (req.url.startsWith('/api/port-nicknames') && req.method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({ ok: true, nicknames: workspaceConfig.portNicknames }));
+      return;
+    }
+
+    if (req.url.startsWith('/api/port-nicknames') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, nickname } = JSON.parse(body);
+        await setPortNickname(port, nickname);
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, nicknames: workspaceConfig.portNicknames }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Get install logs
+    if (req.url.startsWith('/api/install-logs') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const limit = parseInt(url.searchParams.get('limit') || '50');
+        const logs = await getRecentInstallLogs(limit);
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, logs }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Add install log entry manually
+    if (req.url.startsWith('/api/install-logs') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, entry } = JSON.parse(body);
+        const key = await addInstallLogEntry(port, entry);
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, key }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
     // API: Get available ports
     if (req.url.startsWith('/api/ports')) {
       try {
         const detection = await detectEsp32Ports(10);
+        // Add nicknames to port info
+        const portsWithNicknames = detection.ports.map(p => ({
+          ...p,
+          nickname: getPortNickname(p.port),
+        }));
         res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
-        res.end(JSON.stringify({ ok: true, ports: detection.ports }));
+        res.end(JSON.stringify({ ok: true, ports: portsWithNicknames }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: false, error: String(error) }));
@@ -3089,6 +3392,20 @@ class MonitorSession {
         if (this.options.detectReboot && REBOOT_PATTERNS.some((pattern) => pattern.test(line))) {
           this.rebootDetected = true;
         }
+        
+        // Detect ::RegisteredInfo:: pattern and log it
+        const registeredInfo = parseRegisteredInfo(line);
+        if (registeredInfo) {
+          addInstallLogEntry(this.options.port, registeredInfo).then(key => {
+            serialBroadcaster.broadcast({
+              type: 'install_log',
+              port: this.options.port,
+              key,
+              entry: registeredInfo,
+            });
+          }).catch(() => {});
+        }
+        
         serialBroadcaster.broadcast({
           type: 'serial',
           token: this.token,
