@@ -2709,22 +2709,35 @@ async function detectEsp32Ports(maxPorts: number): Promise<{
   }
 
   const ports: DetectedPortInfo[] = [];
-  const entries = Array.isArray((parsed as { ports?: unknown[] } | undefined)?.ports)
-    ? ((parsed as { ports?: unknown[] }).ports as Array<Record<string, unknown>>)
-    : [];
+  
+  // Support both old format (ports) and new format (detected_ports)
+  const parsedObj = parsed as { ports?: unknown[]; detected_ports?: unknown[] } | undefined;
+  const rawEntries = Array.isArray(parsedObj?.detected_ports)
+    ? parsedObj.detected_ports
+    : Array.isArray(parsedObj?.ports)
+      ? parsedObj.ports
+      : [];
+  const entries = rawEntries as Array<Record<string, unknown>>;
 
   for (const entry of entries) {
-    const address = (entry.address as string | undefined)
+    // New format: { port: { address: "..." }, matching_boards: [...] }
+    // Old format: { address: "...", matching_boards: [...] }
+    const portObj = entry.port as Record<string, unknown> | undefined;
+    const address = (portObj?.address as string | undefined)
+      ?? (entry.address as string | undefined)
       ?? (entry.port as string | undefined)
       ?? (entry.address_label as string | undefined)
       ?? (entry.com_name as string | undefined);
     if (!address) {
       continue;
     }
+    
     const boardsRaw = [
       ...(Array.isArray(entry.matching_boards) ? entry.matching_boards : []),
       ...(Array.isArray(entry.boards) ? entry.boards : []),
     ] as Array<Record<string, unknown>>;
+    
+    // Check if it's an ESP32 by matching_boards or by port name pattern
     const matching = boardsRaw.find((board) => {
       const name = (board.FQBN as string | undefined)
         ?? (board.fqbn as string | undefined)
@@ -2733,22 +2746,31 @@ async function detectEsp32Ports(maxPorts: number): Promise<{
         ?? '';
       return name.toLowerCase().includes('esp32');
     });
+    
+    // Also detect ESP32 by common USB-to-serial chip patterns (CP210x, CH340, etc)
+    const isEsp32ByPort = /SLAB_USBtoUART|usbserial|wchusbserial|CP210|CH340/i.test(address);
+    
     const matchingFqbn = (matching?.FQBN as string | undefined)
       ?? (matching?.fqbn as string | undefined)
       ?? (matching?.name as string | undefined)
       ?? (matching?.boardName as string | undefined);
 
+    const label = (portObj?.label as string | undefined)
+      ?? (entry.label as string | undefined)
+      ?? (entry.address_label as string | undefined)
+      ?? (entry.identification as string | undefined)
+      ?? (entry.port_label as string | undefined);
+      
+    const props = (portObj?.properties ?? entry.properties) as { product?: string; vendor?: string } | undefined;
+
     ports.push({
       port: address,
-      protocol: (entry.protocol as string | undefined) ?? (entry.protocol_label as string | undefined),
-      label: (entry.label as string | undefined)
-        ?? (entry.address_label as string | undefined)
-        ?? (entry.identification as string | undefined)
-        ?? (entry.port_label as string | undefined),
-      product: (entry.properties as { product?: string } | undefined)?.product,
-      vendor: (entry.properties as { vendor?: string } | undefined)?.vendor,
+      protocol: (portObj?.protocol as string | undefined) ?? (entry.protocol as string | undefined) ?? (entry.protocol_label as string | undefined),
+      label,
+      product: props?.product,
+      vendor: props?.vendor,
       matchingFqbn,
-      isEsp32: Boolean(matching),
+      isEsp32: Boolean(matching) || isEsp32ByPort,
       reachable: fsSync.existsSync(address),
     });
   }
