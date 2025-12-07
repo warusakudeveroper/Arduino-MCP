@@ -1379,15 +1379,16 @@ const CONSOLE_HTML = `<!DOCTYPE html>
   <header>
     <div class="header-top">
       <div class="logo">⚡ ESP32 Serial Console</div>
-      <div class="status-badge disconnected" id="statusBadge">
+      <div class="status-badge disconnected" id="statusBadge" title="SSEサーバーへの接続状態（ESP32接続とは別）">
         <span class="status-dot"></span>
-        <span id="statusText">Connecting...</span>
+        <span id="statusText">SSE Connecting...</span>
       </div>
       <div class="stats">
         <div class="stat">Lines: <span class="stat-value" id="totalLines">0</span></div>
         <div class="stat">Alerts: <span class="stat-value" id="totalAlerts">0</span></div>
         <div class="stat">Crashes: <span class="stat-value" id="totalCrashes">0</span></div>
       </div>
+      <button class="outline sm" id="restartServerBtn" title="MCPサーバーを再起動（全モニターを停止してサーバーをリロード）" style="margin-left:auto;">🔄 Server Restart</button>
     </div>
     <div class="toolbar">
       <div class="toolbar-group">
@@ -1404,8 +1405,8 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       </div>
       <button class="outline" id="clearAllBtn" title="全ポートのログをクリア">🗑 Clear All</button>
       <button class="outline" id="exportBtn" title="ログをテキストファイルでダウンロード">📥 Export</button>
-      <button class="danger" id="stopStreamBtn" title="SSEストリームを停止（モニターは継続）">⏹ Stop</button>
-      <button class="success" id="startStreamBtn" title="SSEストリームを再開">▶ Start</button>
+      <button class="danger" id="stopStreamBtn" title="SSEストリームを停止（モニターは継続）">⏹ SSE Stop</button>
+      <button class="success" id="startStreamBtn" title="SSEストリームを再開">▶ SSE Start</button>
     </div>
   </header>
 
@@ -2177,8 +2178,8 @@ const CONSOLE_HTML = `<!DOCTYPE html>
     function connect() {
       if (es) es.close();
       es = new EventSource('/events');
-      es.onopen = () => setStatus(true, 'Connected');
-      es.onerror = () => setStatus(false, 'Disconnected (retrying...)');
+      es.onopen = () => setStatus(true, 'SSE Connected');
+      es.onerror = () => setStatus(false, 'SSE Disconnected (retrying...)');
       es.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
@@ -2197,7 +2198,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
     
     function disconnect() {
       if (es) { es.close(); es = null; }
-      setStatus(false, 'Stopped');
+      setStatus(false, 'SSE Stopped');
     }
     
     // Device info and MAC extraction
@@ -2374,6 +2375,28 @@ const CONSOLE_HTML = `<!DOCTYPE html>
     // Install log history button
     document.getElementById('installLogHistoryBtn').onclick = showInstallLogHistory;
     
+    // Server restart button
+    document.getElementById('restartServerBtn').onclick = async () => {
+      if (!confirm('サーバーを再起動しますか？\\n全てのシリアルモニターが停止します。')) return;
+      
+      const btn = document.getElementById('restartServerBtn');
+      btn.disabled = true;
+      btn.textContent = '🔄 Restarting...';
+      
+      try {
+        await fetch('/api/server/restart', { method: 'POST' });
+        showToast('サーバー再起動中...', 'info');
+        // Wait and reconnect
+        setTimeout(() => {
+          location.reload();
+        }, 2000);
+      } catch (err) {
+        showToast('再起動失敗: ' + err.message, 'error');
+        btn.disabled = false;
+        btn.textContent = '🔄 Server Restart';
+      }
+    };
+    
     // Initial load
     connect();
     scanPorts();
@@ -2502,6 +2525,40 @@ class ConsoleServer {
         res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: false, error: String(error) }));
       }
+      return;
+    }
+
+    // API: Server restart
+    if (req.url.startsWith('/api/server/restart') && req.method === 'POST') {
+      try {
+        // Stop all monitors first
+        await monitorManager.stopAll('server_restart');
+        
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, message: 'Server restarting...' }));
+        
+        // Schedule restart after response is sent
+        setTimeout(() => {
+          console.log('[ArduinoMCP] Server restart requested, reloading...');
+          process.exit(0); // Exit and let process manager restart
+        }, 500);
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Server status/health check
+    if (req.url.startsWith('/api/server/status') && req.method === 'GET') {
+      const monitors = monitorManager.listSessions();
+      res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({
+        ok: true,
+        uptime: process.uptime(),
+        monitors: monitors.length,
+        memory: process.memoryUsage(),
+      }));
       return;
     }
 
@@ -3714,6 +3771,21 @@ class MonitorManager {
 
   listTokens() {
     return Array.from(this.sessions.keys());
+  }
+
+  listSessions() {
+    return Array.from(this.sessions.entries()).map(([token, session]) => ({
+      token,
+      port: session.port,
+    }));
+  }
+
+  async stopAll(_reason: string = 'stop_all') {
+    const promises: Promise<MonitorSummary>[] = [];
+    for (const session of this.sessions.values()) {
+      promises.push(session.stop());
+    }
+    await Promise.all(promises);
   }
 }
 
