@@ -243,6 +243,7 @@ export class MonitorSession {
       ok: true,
       token: this.token,
       port: this.options.port,
+      baud: this.selectedBaud,
       lines: this.lines,
       elapsedSeconds,
       rebootDetected: this.rebootDetected,

@@ -81,6 +81,7 @@ export interface MonitorSummary {
   ok: boolean;
   token: string;
   port: string;
+  baud?: number;
   lines: number;
   elapsedSeconds: number;
   rebootDetected: boolean;
