@@ -33,7 +33,8 @@ sketches/*
 data/*
 !data/README.md
 Temp/
-.arduino-mcp/
+.arduino-mcp/config.json
+.arduino-mcp/installlog.json
 
 # Python
 __pycache__/

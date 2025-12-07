@@ -2532,7 +2532,7 @@ class ConsoleServer {
     if (req.url.startsWith('/api/server/restart') && req.method === 'POST') {
       try {
         // Stop all monitors first
-        await monitorManager.stopAll('server_restart');
+        await monitorManager.stopAll();
         
         res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: true, message: 'Server restarting...' }));
@@ -3167,7 +3167,7 @@ async function runCompile(args: z.infer<typeof compileSchema>): Promise<CompileS
   const artifacts = result.exitCode === 0 ? await collectArtifacts(buildPath) : [];
   
   // Copy .bin files to builds directory for easier access
-  let copiedToBuildDir: string[] = [];
+  const copiedToBuildDir: string[] = [];
   if (result.exitCode === 0 && args.export_bin) {
     try {
       await ensureDirectory(workspaceConfig.buildOutputDir);
@@ -3780,7 +3780,7 @@ class MonitorManager {
     }));
   }
 
-  async stopAll(_reason: string = 'stop_all') {
+  async stopAll() {
     const promises: Promise<MonitorSummary>[] = [];
     for (const session of this.sessions.values()) {
       promises.push(session.stop());
