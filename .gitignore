@@ -25,6 +25,16 @@ dist/
 build/
 *.log
 
+# ArduinoMCP Workspace (keep README files)
+builds/*
+!builds/README.md
+sketches/*
+!sketches/README.md
+data/*
+!data/README.md
+Temp/
+.arduino-mcp/
+
 # Python
 __pycache__/
 *.py[cod]

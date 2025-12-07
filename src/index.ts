@@ -50,7 +50,23 @@ const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS/Linux/Windows. Tools pr
 Defaults: FQBN esp32:esp32:esp32 (override with ESP32_FQBN). arduino-cli path can be overridden via ARDUINO_CLI.`;
 
 const PROJECT_ROOT = process.cwd();
-const TEMP_DIR = path.resolve(PROJECT_ROOT, 'Temp');
+
+// ArduinoMCP Workspace Directory Structure
+const WORKSPACE_DIRS = {
+  builds: path.resolve(PROJECT_ROOT, 'builds'),       // ビルド済みファームウェア (.bin)
+  sketches: path.resolve(PROJECT_ROOT, 'sketches'),   // スケッチファイル
+  data: path.resolve(PROJECT_ROOT, 'data'),           // SPIFFSデータ
+  temp: path.resolve(PROJECT_ROOT, 'Temp'),           // 一時ファイル
+  config: path.resolve(PROJECT_ROOT, '.arduino-mcp'), // 設定ファイル
+};
+
+const TEMP_DIR = WORKSPACE_DIRS.temp;
+const BUILDS_DIR = WORKSPACE_DIRS.builds;
+const SKETCHES_DIR = WORKSPACE_DIRS.sketches;
+const DATA_DIR = WORKSPACE_DIRS.data;
+const CONFIG_DIR = WORKSPACE_DIRS.config;
+const CONFIG_FILE = path.join(CONFIG_DIR, 'config.json');
+
 const VENDOR_DIR = path.resolve(PROJECT_ROOT, 'vendor');
 const VENDOR_ARDUINO_DIR = path.join(VENDOR_DIR, 'arduino-cli');
 const VENDOR_ARDUINO_BIN = path.join(
@@ -58,6 +74,103 @@ const VENDOR_ARDUINO_BIN = path.join(
   process.platform === 'win32' ? 'arduino-cli.exe' : 'arduino-cli',
 );
 const VENV_DIR = path.join(PROJECT_ROOT, '.venv');
+
+// Workspace configuration
+interface WorkspaceConfig {
+  buildOutputDir: string;
+  sketchesDir: string;
+  dataDir: string;
+  defaultFqbn: string;
+  defaultBaud: number;
+  additionalBuildDirs: string[];
+}
+
+const DEFAULT_CONFIG: WorkspaceConfig = {
+  buildOutputDir: BUILDS_DIR,
+  sketchesDir: SKETCHES_DIR,
+  dataDir: DATA_DIR,
+  defaultFqbn: 'esp32:esp32:esp32',
+  defaultBaud: 115200,
+  additionalBuildDirs: [],
+};
+
+let workspaceConfig: WorkspaceConfig = { ...DEFAULT_CONFIG };
+
+async function loadWorkspaceConfig(): Promise<WorkspaceConfig> {
+  try {
+    if (await pathExists(CONFIG_FILE)) {
+      const content = await fs.readFile(CONFIG_FILE, 'utf-8');
+      const loaded = JSON.parse(content);
+      workspaceConfig = { ...DEFAULT_CONFIG, ...loaded };
+    }
+  } catch (e) {
+    console.error('Failed to load config:', e);
+  }
+  return workspaceConfig;
+}
+
+async function saveWorkspaceConfig(config: Partial<WorkspaceConfig>): Promise<void> {
+  workspaceConfig = { ...workspaceConfig, ...config };
+  await ensureDirectory(CONFIG_DIR);
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(workspaceConfig, null, 2));
+}
+
+async function setupWorkspace(): Promise<{ created: string[]; existing: string[] }> {
+  const created: string[] = [];
+  const existing: string[] = [];
+  
+  for (const [name, dir] of Object.entries(WORKSPACE_DIRS)) {
+    if (await pathExists(dir)) {
+      existing.push(name);
+    } else {
+      await ensureDirectory(dir);
+      created.push(name);
+    }
+  }
+  
+  // Create README files in each directory
+  const readmeContents: Record<string, string> = {
+    builds: `# Builds Directory
+ビルド済みファームウェア（.bin）をここに配置してください。
+コンソールUIの「Scan Builds」で検出されます。
+
+例:
+- my_project.ino.bin
+- firmware_v1.0.bin
+`,
+    sketches: `# Sketches Directory
+Arduinoスケッチ（.ino）をここに配置してください。
+
+例:
+- my_project/
+  - my_project.ino
+  - config.h
+`,
+    data: `# Data Directory
+SPIFFSにアップロードするデータファイルをここに配置してください。
+
+例:
+- index.html
+- config.json
+- images/
+`,
+  };
+  
+  for (const [name, content] of Object.entries(readmeContents)) {
+    const readmePath = path.join(WORKSPACE_DIRS[name as keyof typeof WORKSPACE_DIRS], 'README.md');
+    if (!await pathExists(readmePath)) {
+      await fs.writeFile(readmePath, content);
+    }
+  }
+  
+  // Load or create config
+  await loadWorkspaceConfig();
+  if (!await pathExists(CONFIG_FILE)) {
+    await saveWorkspaceConfig({});
+  }
+  
+  return { created, existing };
+}
 
 const DEFAULT_FQBN = process.env.ESP32_FQBN ?? 'esp32:esp32:esp32';
 function resolveArduinoCliExecutable(): string {
@@ -279,6 +392,7 @@ interface CompileSummary {
   stderr: string;
   diagnostics: Diagnostic[];
   artifacts: string[];
+  copiedToBuildDir?: string[];
   command: {
     executable: string;
     args: string[];
@@ -533,6 +647,13 @@ const quickstartSchema = z.object({
   sketch_path: z.string().optional().describe('Path to an existing sketch to compile and upload. If not provided, a blink example will be created.'),
   port: z.string().optional().describe('Serial port to upload to. If not provided, will auto-detect ESP32.'),
   monitor_seconds: z.number().positive().optional().default(10).describe('Seconds to monitor serial output after upload'),
+});
+
+const workspaceSetupSchema = z.object({
+  build_dir: z.string().optional().describe('Custom build output directory path'),
+  sketches_dir: z.string().optional().describe('Custom sketches directory path'),
+  data_dir: z.string().optional().describe('Custom SPIFFS data directory path'),
+  additional_build_dirs: z.array(z.string()).optional().describe('Additional directories to scan for .bin files'),
 });
 
 const eraseFlashSchema = z.object({
@@ -2075,6 +2196,47 @@ class ConsoleServer {
       return;
     }
 
+    // API: Setup workspace
+    if (req.url.startsWith('/api/workspace/setup') && req.method === 'POST') {
+      try {
+        const result = await setupWorkspace();
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, ...result, config: workspaceConfig }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Get workspace config
+    if (req.url.startsWith('/api/workspace/config') && req.method === 'GET') {
+      try {
+        await loadWorkspaceConfig();
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, config: workspaceConfig, dirs: WORKSPACE_DIRS }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Update workspace config
+    if (req.url.startsWith('/api/workspace/config') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const updates = JSON.parse(body);
+        await saveWorkspaceConfig(updates);
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, config: workspaceConfig }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
     // API: Get available ports
     if (req.url.startsWith('/api/ports')) {
       try {
@@ -2174,8 +2336,13 @@ class ConsoleServer {
     // API: Scan for build artifacts
     if (req.url.startsWith('/api/artifacts')) {
       try {
-        const artifacts: Array<{ path: string; name: string; size: string }> = [];
-        const searchDirs = [TEMP_DIR, path.join(PROJECT_ROOT, 'build'), path.join(PROJECT_ROOT, '.build')];
+        const artifacts: Array<{ path: string; name: string; size: string; dir: string }> = [];
+        // Use workspace config for search directories
+        const searchDirs = [
+          workspaceConfig.buildOutputDir,
+          TEMP_DIR,
+          ...workspaceConfig.additionalBuildDirs,
+        ].filter(Boolean);
         
         for (const dir of searchDirs) {
           if (await pathExists(dir)) {
@@ -2188,6 +2355,7 @@ class ConsoleServer {
                     path: file,
                     name: path.basename(file),
                     size: (stat.size / 1024).toFixed(1) + ' KB',
+                    dir: path.dirname(file),
                   });
                 } catch (e) {
                   // ignore
@@ -2197,7 +2365,7 @@ class ConsoleServer {
           }
         }
         res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
-        res.end(JSON.stringify({ ok: true, artifacts }));
+        res.end(JSON.stringify({ ok: true, artifacts, searchDirs }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: false, error: String(error) }));
@@ -2637,6 +2805,23 @@ async function runCompile(args: z.infer<typeof compileSchema>): Promise<CompileS
   const durationMs = Date.now() - started;
   const diagnostics = parseDiagnostics(`${result.stdout}\n${result.stderr}`);
   const artifacts = result.exitCode === 0 ? await collectArtifacts(buildPath) : [];
+  
+  // Copy .bin files to builds directory for easier access
+  let copiedToBuildDir: string[] = [];
+  if (result.exitCode === 0 && args.export_bin) {
+    try {
+      await ensureDirectory(workspaceConfig.buildOutputDir);
+      for (const artifact of artifacts) {
+        if (artifact.endsWith('.bin')) {
+          const destPath = path.join(workspaceConfig.buildOutputDir, path.basename(artifact));
+          await fs.copyFile(artifact, destPath);
+          copiedToBuildDir.push(destPath);
+        }
+      }
+    } catch (e) {
+      // Ignore copy errors - the build still succeeded
+    }
+  }
 
   return {
     stage: 'compile',
@@ -2646,6 +2831,7 @@ async function runCompile(args: z.infer<typeof compileSchema>): Promise<CompileS
     stderr: result.stderr,
     diagnostics,
     artifacts,
+    copiedToBuildDir,
     command: {
       executable: ARDUINO_CLI,
       args: cliArgs,
@@ -3392,6 +3578,41 @@ async function runFlashConnected(args: z.infer<typeof flashConnectedSchema>) {
   );
 }
 
+async function runWorkspaceSetup(args: z.infer<typeof workspaceSetupSchema>) {
+  // Setup workspace directories
+  const setupResult = await setupWorkspace();
+  
+  // Apply custom config if provided
+  const configUpdates: Partial<WorkspaceConfig> = {};
+  if (args.build_dir) configUpdates.buildOutputDir = path.resolve(args.build_dir);
+  if (args.sketches_dir) configUpdates.sketchesDir = path.resolve(args.sketches_dir);
+  if (args.data_dir) configUpdates.dataDir = path.resolve(args.data_dir);
+  if (args.additional_build_dirs) configUpdates.additionalBuildDirs = args.additional_build_dirs.map(d => path.resolve(d));
+  
+  if (Object.keys(configUpdates).length > 0) {
+    await saveWorkspaceConfig(configUpdates);
+  }
+  
+  const result = {
+    created: setupResult.created,
+    existing: setupResult.existing,
+    config: workspaceConfig,
+    directories: {
+      builds: workspaceConfig.buildOutputDir,
+      sketches: workspaceConfig.sketchesDir,
+      data: workspaceConfig.dataDir,
+      temp: TEMP_DIR,
+      config: CONFIG_DIR,
+    },
+  };
+  
+  const message = setupResult.created.length > 0
+    ? `Workspace setup complete. Created: ${setupResult.created.join(', ')}`
+    : 'Workspace already configured.';
+  
+  return toToolResult(result, message);
+}
+
 async function runStartConsole(args: z.infer<typeof startConsoleSchema>) {
   try {
     const result = consoleServer.start({ host: args.host, port: args.port });
@@ -3773,6 +3994,12 @@ server.registerTool('quickstart', {
   inputSchema: quickstartSchema.shape,
 }, async (params) => runQuickstart(quickstartSchema.parse(params)));
 
+server.registerTool('workspace_setup', {
+  title: 'Setup ArduinoMCP Workspace',
+  description: 'Initialize workspace directory structure (builds/, sketches/, data/, Temp/) and configure build output paths. Run this first to set up your project.',
+  inputSchema: workspaceSetupSchema.shape,
+}, async (params) => runWorkspaceSetup(workspaceSetupSchema.parse(params)));
+
 server.registerTool('start_console', {
   title: 'Start Serial Console (SSE)',
   description: 'Launch a local SSE console at http://<host>:<port> for real-time serial logs',
@@ -3926,6 +4153,9 @@ server.registerTool('get_logs', {
 }, async (params) => runGetLogs(getLogsSchema.parse(params)));
 
 async function main() {
+  // Initialize workspace on startup
+  await loadWorkspaceConfig();
+  
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
