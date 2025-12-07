@@ -1130,46 +1130,6 @@ const CONSOLE_HTML = `<!DOCTYPE html>
     }
     .pulse { animation: pulse-green 2s infinite; }
     
-    /* Help icon and tooltip */
-    .help-icon { 
-      display: inline-flex; align-items: center; justify-content: center;
-      width: 18px; height: 18px; border-radius: 50%; 
-      background: var(--border); color: var(--text-muted); 
-      font-size: 11px; font-weight: bold; cursor: help;
-      margin-left: 4px; transition: all 0.2s;
-    }
-    .help-icon:hover { background: var(--accent); color: white; }
-    
-    /* Custom tooltip */
-    [data-tooltip] { position: relative; }
-    [data-tooltip]:hover::after {
-      content: attr(data-tooltip);
-      position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
-      background: #1e293b; color: #e2e8f0; padding: 8px 12px; border-radius: 6px;
-      font-size: 12px; white-space: nowrap; z-index: 1000;
-      box-shadow: 0 4px 12px rgba(0,0,0,0.3); margin-bottom: 8px;
-      animation: tooltipFade 0.2s ease;
-    }
-    [data-tooltip]:hover::before {
-      content: ''; position: absolute; bottom: 100%; left: 50%;
-      transform: translateX(-50%); border: 6px solid transparent;
-      border-top-color: #1e293b; margin-bottom: -4px; z-index: 1001;
-    }
-    @keyframes tooltipFade { from { opacity: 0; transform: translateX(-50%) translateY(4px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
-    
-    /* Modal */
-    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; }
-    .modal { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; }
-    .modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
-    .modal-title { font-size: 18px; font-weight: 600; }
-    .modal-close { background: none; border: none; color: var(--text-muted); font-size: 24px; cursor: pointer; padding: 0; line-height: 1; }
-    .modal-close:hover { color: var(--text); }
-    .modal-body { padding: 20px; font-size: 14px; line-height: 1.6; }
-    .modal-body h3 { margin: 16px 0 8px; color: var(--accent); font-size: 15px; }
-    .modal-body p { margin: 0 0 12px; color: var(--text-muted); }
-    .modal-body code { background: var(--bg-dark); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
-    .modal-body ul { margin: 0 0 12px; padding-left: 20px; }
-    .modal-body li { margin-bottom: 4px; color: var(--text-muted); }
   </style>
 </head>
 <body>
@@ -1188,22 +1148,21 @@ const CONSOLE_HTML = `<!DOCTYPE html>
     </div>
     <div class="toolbar">
       <div class="toolbar-group">
-        <label>Filter <span class="help-icon" onclick="showHelp('filter')">?</span></label>
+        <label>Filter</label>
         <input type="text" id="textFilter" class="input-wide" placeholder="Filter logs (regex)" title="正規表現でログをフィルタリング。例: WiFi|HTTP" />
       </div>
       <div class="toolbar-group">
-        <label>Highlight <span class="help-icon" onclick="showHelp('highlight')">?</span></label>
+        <label>Highlight</label>
         <input type="text" id="highlightFilter" class="input-wide" placeholder="Highlight text (regex)" title="マッチしたテキストを黄色でハイライト表示" />
       </div>
       <div class="toolbar-group">
-        <label>Alert on <span class="help-icon" onclick="showHelp('alert')">?</span></label>
+        <label>Alert on</label>
         <input type="text" id="alertFilter" class="input-wide" placeholder="Alert pattern (regex)" title="マッチしたログをAlertsパネルにも表示" />
       </div>
       <button class="outline" id="clearAllBtn" title="全ポートのログをクリア">🗑 Clear All</button>
       <button class="outline" id="exportBtn" title="ログをテキストファイルでダウンロード">📥 Export</button>
       <button class="danger" id="stopStreamBtn" title="SSEストリームを停止（モニターは継続）">⏹ Stop</button>
       <button class="success" id="startStreamBtn" title="SSEストリームを再開">▶ Start</button>
-      <button class="outline" id="helpBtn" title="ヘルプを表示" onclick="showHelp('main')">❓ Help</button>
     </div>
   </header>
 
@@ -1233,7 +1192,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
         </div>
         <div class="control-panel">
           <div class="control-section">
-            <span class="control-label">Available Ports <span class="help-icon" onclick="showHelp('ports')">?</span></span>
+            <span class="control-label">Available Ports</span>
             <div class="port-list" id="availablePorts">
               <div class="empty-state" style="padding: 20px;">
                 <p>Click refresh to scan ports</p>
@@ -1244,7 +1203,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
             </div>
           </div>
           <div class="control-section">
-            <span class="control-label">Quick Start <span class="help-icon" onclick="showHelp('quickstart')">?</span></span>
+            <span class="control-label">Quick Start</span>
             <div class="control-row">
               <select id="baudSelect" style="flex:1" title="シリアル通信のボーレート（ESP32は通常115200）">
                 <option value="115200" selected>115200</option>
@@ -1303,7 +1262,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       <!-- Device Info Panel -->
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">📱 Device Info <span class="help-icon" onclick="showHelp('deviceinfo')">?</span></div>
+          <div class="panel-title">📱 Device Info</div>
           <button class="sm outline" id="refreshDeviceInfoBtn" title="esptool.pyでチップ情報を再取得">↻ Refresh</button>
         </div>
         <div class="control-panel" id="deviceInfoPanel">
@@ -1316,7 +1275,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       <!-- Firmware Upload Panel -->
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">📦 Firmware Upload <span class="help-icon" onclick="showHelp('firmware')">?</span></div>
+          <div class="panel-title">📦 Firmware Upload</div>
         </div>
         <div class="control-panel">
           <div class="control-section">
@@ -1348,7 +1307,7 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       <!-- Arduino CLI Settings Panel -->
       <div class="panel">
         <div class="panel-header">
-          <div class="panel-title">⚙ Settings <span class="help-icon" onclick="showHelp('settings')">?</span></div>
+          <div class="panel-title">⚙ Settings</div>
         </div>
         <div class="control-panel">
           <div class="control-section">
@@ -1500,204 +1459,6 @@ const CONSOLE_HTML = `<!DOCTYPE html>
       div.textContent = text;
       return div.innerHTML;
     }
-    
-    // Help modal system
-    const helpContent = {
-      main: {
-        title: 'ESP32 Serial Console ヘルプ',
-        body: \`
-          <h3>🎯 概要</h3>
-          <p>複数のESP32を同時に監視できるシリアルコンソールです。MCPと連携してAI駆動の開発をサポートします。</p>
-          
-          <h3>📟 基本操作</h3>
-          <ul>
-            <li><strong>Scan Ports</strong> - USBポートをスキャンしてESP32を検出</li>
-            <li><strong>Start/Stop</strong> - 各ポートの監視を開始/停止</li>
-            <li><strong>Start All ESP32</strong> - cu.SLAB_USBtoUART等のESP32ポートを一括開始</li>
-          </ul>
-          
-          <h3>🔍 フィルタ機能</h3>
-          <ul>
-            <li><strong>Filter</strong> - 正規表現でログを絞り込み表示</li>
-            <li><strong>Highlight</strong> - マッチするテキストを黄色で強調</li>
-            <li><strong>Alert on</strong> - マッチしたログをAlertsパネルにも表示</li>
-          </ul>
-          
-          <h3>🚨 自動検出</h3>
-          <p>クラッシュ（Guru Meditation等）やリブートは自動で検出され、専用パネルに記録されます。</p>
-        \`
-      },
-      filter: {
-        title: 'Filter（フィルタ）',
-        body: \`
-          <h3>使い方</h3>
-          <p>正規表現を入力すると、マッチするログ行のみ表示されます。</p>
-          
-          <h3>例</h3>
-          <ul>
-            <li><code>WiFi</code> - WiFiを含む行のみ表示</li>
-            <li><code>error|fail</code> - errorまたはfailを含む行</li>
-            <li><code>^\\[E\\]</code> - [E]で始まる行（ESPログレベル）</li>
-            <li><code>HTTP.*200</code> - HTTPと200が同じ行にある</li>
-          </ul>
-          
-          <h3>ヒント</h3>
-          <p>大文字小文字は区別しません。空にするとすべて表示されます。</p>
-        \`
-      },
-      highlight: {
-        title: 'Highlight（ハイライト）',
-        body: \`
-          <h3>使い方</h3>
-          <p>正規表現を入力すると、マッチするテキストが黄色で強調表示されます。</p>
-          
-          <h3>例</h3>
-          <ul>
-            <li><code>MAC|IP</code> - MACとIPを強調</li>
-            <li><code>192\\.168\\.[0-9.]+</code> - IPアドレスを強調</li>
-            <li><code>connected|disconnected</code> - 接続状態を強調</li>
-          </ul>
-          
-          <h3>ヒント</h3>
-          <p>Filterと併用可能。フィルタされた行の中でさらに強調できます。</p>
-        \`
-      },
-      alert: {
-        title: 'Alert on（アラート）',
-        body: \`
-          <h3>使い方</h3>
-          <p>正規表現を入力すると、マッチしたログ行がAlertsパネルにも表示されます。</p>
-          
-          <h3>活用例</h3>
-          <ul>
-            <li><code>PASS|OK|SUCCESS</code> - テスト合格を検出</li>
-            <li><code>error|fail|exception</code> - エラーを検出</li>
-            <li><code>boot completed</code> - 起動完了を検出</li>
-          </ul>
-          
-          <h3>量産テスト向け</h3>
-          <p>10台のESP32を接続し、特定のシリアル出力でPass/Failを判定する使い方に最適です。</p>
-        \`
-      },
-      quickstart: {
-        title: 'Quick Start（クイックスタート）',
-        body: \`
-          <h3>ボーレート</h3>
-          <p>ESP32は通常<code>115200</code>です。起動直後は<code>74880</code>でブートログが出ます。</p>
-          
-          <h3>Auto（自動ボーレート）</h3>
-          <p>ONにすると、74880のブートメッセージ後に自動で115200に切り替わります。</p>
-          
-          <h3>Start All ESP32</h3>
-          <p>以下のパターンにマッチするポートを自動で開始します：</p>
-          <ul>
-            <li><code>cu.SLAB_USBtoUART</code> - CP2102/CP2104チップ</li>
-            <li><code>cu.usbserial</code> - CH340/CH341チップ</li>
-            <li><code>cu.wchusbserial</code> - WCH系チップ</li>
-          </ul>
-        \`
-      },
-      ports: {
-        title: 'Available Ports（利用可能なポート）',
-        body: \`
-          <h3>ポート一覧</h3>
-          <p>Scan Portsをクリックすると、接続されているUSBシリアルポートが表示されます。</p>
-          
-          <h3>色の意味</h3>
-          <ul>
-            <li><span style="color:#22c55e">●緑</span> - 監視中</li>
-            <li><span style="color:#6b7280">●灰</span> - 未監視</li>
-          </ul>
-          
-          <h3>操作</h3>
-          <p>各ポートの横にあるボタンで個別に開始/停止できます。</p>
-          
-          <h3>ESP32が見つからない？</h3>
-          <ul>
-            <li>USBケーブルがデータ対応か確認</li>
-            <li>CP2102/CH340ドライバがインストールされているか確認</li>
-            <li>macOS: システム環境設定→セキュリティで許可が必要な場合あり</li>
-          </ul>
-        \`
-      },
-      firmware: {
-        title: 'Firmware Upload（ファームウェアアップロード）',
-        body: \`
-          <h3>概要</h3>
-          <p>ビルド済みのファームウェア(.bin)を複数のESP32に一括アップロードできます。</p>
-          
-          <h3>操作手順</h3>
-          <ol>
-            <li><strong>Scan Builds</strong> - ビルドディレクトリをスキャン</li>
-            <li>ドロップダウンからファームウェアを選択</li>
-            <li><strong>Upload to Selected</strong> または <strong>Upload to All ESP32</strong></li>
-          </ol>
-          
-          <h3>オプション</h3>
-          <ul>
-            <li><strong>Erase before flash</strong> - Flash全消去後にアップロード（設定リセット時に使用）</li>
-          </ul>
-          
-          <h3>注意</h3>
-          <p>アップロード中はシリアル監視を一時停止します。完了後に自動で再開されます。</p>
-        \`
-      },
-      settings: {
-        title: 'Settings（設定）',
-        body: \`
-          <h3>FQBN（ボード指定）</h3>
-          <p>Fully Qualified Board Name。お使いのESP32の種類を選択してください。</p>
-          <ul>
-            <li><strong>ESP32 Dev Module</strong> - 一般的なDevKit</li>
-            <li><strong>ESP32-S2/S3/C3</strong> - 新しいバリエーション</li>
-          </ul>
-          
-          <h3>Partition Scheme</h3>
-          <p>Flashメモリの分割方法。大きなプログラムはHuge APPを選択。</p>
-          
-          <h3>Flash Mode</h3>
-          <ul>
-            <li><strong>QIO</strong> - 最速（ほとんどのモジュール）</li>
-            <li><strong>DIO</strong> - 互換性モード（書き込みに問題がある場合）</li>
-          </ul>
-        \`
-      },
-      deviceinfo: {
-        title: 'Device Info（デバイス情報）',
-        body: \`
-          <h3>表示内容</h3>
-          <ul>
-            <li><strong>Chip</strong> - ESP32のチップタイプ</li>
-            <li><strong>Flash</strong> - Flashメモリサイズ</li>
-            <li><strong>MAC Address</strong> - Wi-Fi/BT MACアドレス</li>
-          </ul>
-          
-          <h3>MAC取得方法</h3>
-          <p>esptool.pyを使用してチップから直接読み取ります。ファームウェアは不要です。</p>
-          
-          <h3>Refreshボタン</h3>
-          <p>シリアルモニター停止後にデバイス情報を再取得できます。</p>
-        \`
-      }
-    };
-    
-    function showHelp(topic) {
-      const content = helpContent[topic] || helpContent.main;
-      const overlay = document.createElement('div');
-      overlay.className = 'modal-overlay';
-      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
-      overlay.innerHTML = \`
-        <div class="modal">
-          <div class="modal-header">
-            <span class="modal-title">\${content.title}</span>
-            <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
-          </div>
-          <div class="modal-body">\${content.body}</div>
-        </div>
-      \`;
-      document.body.appendChild(overlay);
-    }
-    window.showHelp = showHelp;
     
     function applyHighlight(text) {
       if (!highlightRegex) return escapeHtml(text);
