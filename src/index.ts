@@ -25,6 +25,53 @@ import {
   runCompile,
   runUpload,
 } from './mcp/tools/index.js';
+import {
+  pathExists,
+  ensureDirectory,
+  resolveSketchPath,
+  collectFiles,
+} from './utils/fs.js';
+import type {
+  WorkspaceConfig,
+  DetectedPortInfo,
+  UnknownIdentifier,
+} from './types.js';
+import type {
+  PinSpec,
+} from './utils/pins.js';
+
+// Local pin analysis types (different from utils/pins.ts types)
+interface PinWarning {
+  severity: 'error' | 'warning' | 'info';
+  pin?: number;
+  name?: string;
+  message: string;
+  file?: string;
+  line?: number;
+}
+
+interface PinUsageEntry {
+  kind: 'PIN_MODE' | 'DIGITAL_WRITE' | 'DIGITAL_READ' | 'ANALOG_READ' | 'ANALOG_WRITE' | 'DAC_WRITE' | 'TOUCH_READ';
+  mode?: string;
+  identifier: string;
+  expression: string;
+  file: string;
+  line: number;
+}
+
+interface PinUsageSummary {
+  pin: number;
+  name: string;
+  available: boolean;
+  usage: Array<{
+    kind: PinUsageEntry['kind'];
+    mode?: string;
+    file: string;
+    line: number;
+    identifier: string;
+  }>;
+  spec?: PinSpec;
+}
 
 // Re-export new modules for external use
 export * from './types.js';
@@ -97,17 +144,7 @@ const VENDOR_ARDUINO_BIN = path.join(
 );
 const VENV_DIR = path.join(PROJECT_ROOT, '.venv');
 
-// Workspace configuration
-interface WorkspaceConfig {
-  buildOutputDir: string;
-  sketchesDir: string;
-  dataDir: string;
-  defaultFqbn: string;
-  defaultBaud: number;
-  additionalBuildDirs: string[];
-  portNicknames: Record<string, string>;  // ポートID -> ニックネーム
-}
-
+// WorkspaceConfig type imported from ./types.ts
 // InstallLogEntry and install log functions moved to ./config/workspace.ts
 
 const DEFAULT_CONFIG: WorkspaceConfig = {
@@ -319,72 +356,9 @@ const server = new McpServer(
 
 // Diagnostic, CompileSummary, UploadSummary types are now in ./types.ts
 
-interface DetectedPortInfo {
-  port: string;
-  protocol?: string;
-  label?: string;
-  product?: string;
-  vendor?: string;
-  matchingFqbn?: string;
-  isEsp32: boolean;
-  reachable: boolean;
-}
-
+// DetectedPortInfo type imported from ./types.ts
 // MonitorSummary, MonitorOptions types are now in ./types.ts
-
-interface PinSpec {
-  number: number;
-  name: string;
-  altNames?: string[];
-  available: boolean;
-  digitalIn: boolean;
-  digitalOut: boolean;
-  analogIn: boolean;
-  dac: boolean;
-  touch: boolean;
-  pwm: boolean;
-  inputOnly: boolean;
-  strapping?: boolean;
-  notes?: string;
-}
-
-interface PinWarning {
-  severity: 'error' | 'warning' | 'info';
-  pin?: number;
-  name?: string;
-  message: string;
-  file?: string;
-  line?: number;
-}
-
-interface PinUsageEntry {
-  kind: 'PIN_MODE' | 'DIGITAL_WRITE' | 'DIGITAL_READ' | 'ANALOG_READ' | 'ANALOG_WRITE' | 'DAC_WRITE' | 'TOUCH_READ';
-  mode?: string;
-  identifier: string;
-  expression: string;
-  file: string;
-  line: number;
-}
-
-interface PinUsageSummary {
-  pin: number;
-  name: string;
-  available: boolean;
-  usage: Array<{
-    kind: PinUsageEntry['kind'];
-    mode?: string;
-    file: string;
-    line: number;
-    identifier: string;
-  }>;
-  spec?: PinSpec;
-}
-
-interface UnknownIdentifier {
-  identifier: string;
-  file: string;
-  line: number;
-}
+// PinSpec, PinWarning, PinUsageEntry, PinUsageSummary, UnknownIdentifier imported from ./types.ts
 
 class InvalidRegexError extends Error {
   constructor(public readonly pattern: string, detail?: string) {
@@ -559,50 +533,12 @@ function toToolResult(data: unknown, message?: string): CallToolResult {
 }
 
 // parseDiagnostics moved to ./mcp/tools/compile.ts
-
-async function ensureDirectory(dir: string) {
-  await fs.mkdir(dir, { recursive: true });
-}
+// pathExists, ensureDirectory, resolveSketchPath imported from ./utils/fs.js
 
 async function collectArtifacts(searchDir: string): Promise<string[]> {
-  const artifacts: string[] = [];
-  async function walk(current: string) {
-    let entries;
-    try {
-      entries = await fs.readdir(current, { withFileTypes: true });
-    } catch (error) {
-      return;
-    }
-    for (const entry of entries) {
-      const fullPath = path.join(current, entry.name);
-      if (entry.isDirectory()) {
-        await walk(fullPath);
-      } else if (ARTIFACT_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
-        artifacts.push(fullPath);
-      }
-    }
-  }
-  await walk(searchDir);
+  const artifacts = await collectFiles(searchDir, ARTIFACT_EXTENSIONS);
   artifacts.sort();
   return artifacts;
-}
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await fs.access(target);
-    return true;
-  } catch (error) {
-    return false;
-  }
-}
-
-async function resolveSketchPath(sketchPath: string): Promise<string> {
-  const absolute = path.resolve(sketchPath);
-  const exists = await pathExists(absolute);
-  if (!exists) {
-    throw new Error(`Sketch path not found: ${absolute}`);
-  }
-  return absolute;
 }
 
 interface ArduinoCliStatus {

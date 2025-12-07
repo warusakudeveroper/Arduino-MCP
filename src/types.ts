@@ -143,3 +143,10 @@ export interface CliRunResult {
   stderr: string;
 }
 
+// Unknown identifier (for pin analysis)
+export interface UnknownIdentifier {
+  identifier: string;
+  file: string;
+  line: number;
+}
+
