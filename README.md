@@ -52,6 +52,7 @@ Local install も可: `npm install @warusakudeveroper/mcp-arduino-esp32`
 | ------ | ---- | ---- | ---- |
 | `version` | なし | arduino-cli のバージョン | `arduino-cli version --json` を使用 |
 | `ensure_core` | なし | esp32 コアが導入されたか | `core install` 実行 |
+| `ensure_dependencies` | `install_missing` | 依存関係セットアップレポート | vendor/ に arduino-cli、.venv+pyserial を用意 |
 | `board_list` | なし | シリアルポート一覧 (JSON) | `arduino-cli board list --format json` |
 | `lib_list` | なし | ライブラリ一覧 (JSON) | `arduino-cli lib list` |
 | `lib_install` | `name` | 成否＋標準出力 | `arduino-cli lib install` |
@@ -61,6 +62,8 @@ Local install も可: `npm install @warusakudeveroper/mcp-arduino-esp32`
 | `monitor_start` | `port`, `auto_baud`, `max_seconds`, `stop_on` etc. | `token` を返し、シリアル・終了イベント送信 | Python + pyserial、リセット込み |
 | `monitor_stop` | `token` または `port` | 停止サマリ | `monitor_start` のセッションを停止 |
 | `pdca_cycle` | `sketch_path`, `port`, `monitor_seconds` | コンパイル・アップロード・モニタまとめ | `monitor_seconds` 秒だけ監視 |
+| `flash_connected` | `sketch_path`, `max_ports`, `build_props` etc. | 検出ESP32へ並列アップロード | Temp/<timestamp> にビルドし全ESP32へ同時フラッシュ |
+| `start_console` | `host`, `port` | SSEコンソール起動 (リアルタイムシリアルログ) | http://host:port で閲覧・ログ取得 |
 | `pin_spec` | — | DevKitC のピン仕様テーブル | capabilities/notes を JSON で返却 |
 | `pin_check` | `sketch_path`, `include_headers` | `warnings[]`, `usage[]`, `unknownIdentifiers[]` | ピンモード/使用状況と DevKitC 仕様の整合性を検証 |
 
@@ -126,6 +129,8 @@ ClaudeCode / Codex CLI (`.mcp.json`):
 }
 ```
 ※ `PATH` に `arduino-cli` が含まれるよう設定。
+
+より詳しい設定例（ClaudeCode CLI / Codex CLI / Gemini CLI / Cursor）とシリアルコンソール利用手順は `docs/cli-setup.md` を参照してください。
 
 ## 5. 典型ワークフロー
 

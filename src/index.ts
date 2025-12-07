@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import fsSync from 'node:fs';
 import path from 'node:path';
 import process from 'node:process';
+import http from 'node:http';
 import { createInterface } from 'node:readline';
 import { randomUUID } from 'node:crypto';
 
@@ -24,11 +25,46 @@ const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS. Tools provided:
 - list_artifacts: enumerate .bin/.elf/.map/.hex under build path
 - monitor_start / monitor_stop: stream serial output with stop conditions + reboot detection
 - pdca_cycle: compile -> upload -> monitor in a single run (useful for automated PDCA)
+- ensure_dependencies: bundle arduino-cli + python(.venv) with pyserial under the project and report versions
+- flash_connected: detect ESP32 boards (<=10), compile to Temp/<timestamp>, and upload in parallel
+- start_console: launch local SSE console to stream serial logs in real-time (http://127.0.0.1:<port>)
 
 Defaults: FQBN esp32:esp32:esp32 (override with ESP32_FQBN). arduino-cli path can be overridden via ARDUINO_CLI.`;
 
+const PROJECT_ROOT = process.cwd();
+const TEMP_DIR = path.resolve(PROJECT_ROOT, 'Temp');
+const VENDOR_DIR = path.resolve(PROJECT_ROOT, 'vendor');
+const VENDOR_ARDUINO_DIR = path.join(VENDOR_DIR, 'arduino-cli');
+const VENDOR_ARDUINO_BIN = path.join(
+  VENDOR_ARDUINO_DIR,
+  process.platform === 'win32' ? 'arduino-cli.exe' : 'arduino-cli',
+);
+const VENV_DIR = path.join(PROJECT_ROOT, '.venv');
+
 const DEFAULT_FQBN = process.env.ESP32_FQBN ?? 'esp32:esp32:esp32';
-const ARDUINO_CLI = process.env.ARDUINO_CLI ?? 'arduino-cli';
+function resolveArduinoCliExecutable(): string {
+  if (process.env.ARDUINO_CLI) {
+    return process.env.ARDUINO_CLI;
+  }
+  if (fsSync.existsSync(VENDOR_ARDUINO_BIN)) {
+    return VENDOR_ARDUINO_BIN;
+  }
+  return 'arduino-cli';
+}
+
+function resolvePythonExecutable(): string {
+  const userSpecified = process.env.MCP_PYTHON;
+  if (userSpecified) {
+    return userSpecified;
+  }
+  const venvPython = path.resolve(VENV_DIR, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  if (fsSync.existsSync(venvPython)) {
+    return venvPython;
+  }
+  return 'python3';
+}
+
+let ARDUINO_CLI = resolveArduinoCliExecutable();
 const ARTIFACT_EXTENSIONS = new Set(['.bin', '.elf', '.map', '.hex']);
 const REBOOT_PATTERNS = [
   /rst:0x[0-9a-f]+/i,
@@ -38,17 +74,7 @@ const REBOOT_PATTERNS = [
   /CPU halted/i,
 ];
 
-const PYTHON = (() => {
-  const userSpecified = process.env.MCP_PYTHON;
-  if (userSpecified) {
-    return userSpecified;
-  }
-  const venvPython = path.resolve(process.cwd(), '.venv/bin/python');
-  if (fsSync.existsSync(venvPython)) {
-    return venvPython;
-  }
-  return 'python3';
-})();
+let PYTHON = resolvePythonExecutable();
 
 const SERIAL_PROBE_SCRIPT = `import sys, time
 try:
@@ -261,6 +287,17 @@ interface UploadSummary {
   durationMs: number;
 }
 
+interface DetectedPortInfo {
+  port: string;
+  protocol?: string;
+  label?: string;
+  product?: string;
+  vendor?: string;
+  matchingFqbn?: string;
+  isEsp32: boolean;
+  reachable: boolean;
+}
+
 interface MonitorSummary {
   token: string;
   port: string;
@@ -349,7 +386,15 @@ class InvalidRegexError extends Error {
 }
 
 class ArduinoCliRunner {
-  constructor(private readonly executable: string) {}
+  constructor(private executable: string) {}
+
+  setExecutable(executable: string) {
+    this.executable = executable;
+  }
+
+  getExecutable() {
+    return this.executable;
+  }
 
   async run(args: string[], options?: { cwd?: string; env?: Record<string, string>; timeoutMs?: number }) {
     const mergedEnv = { ...process.env, ...(options?.env ?? {}) };
@@ -372,22 +417,33 @@ class ArduinoCliRunner {
 
 const cli = new ArduinoCliRunner(ARDUINO_CLI);
 
+function updateArduinoCliPath(executable: string) {
+  ARDUINO_CLI = executable;
+  cli.setExecutable(executable);
+}
+
+function updatePythonExecutable(pythonPath: string) {
+  PYTHON = pythonPath;
+}
+
+const buildPropsSchema = z
+  .union([z.record(z.string()), z.array(z.string())])
+  .optional()
+  .transform((value) => {
+    if (!value) {
+      return [] as string[];
+    }
+    if (Array.isArray(value)) {
+      return value;
+    }
+    return Object.entries(value).map(([key, val]) => `${key}=${val}`);
+  });
+
 const compileSchema = z.object({
   sketch_path: z.string(),
   export_bin: z.boolean().optional().default(true),
   build_path: z.string().optional(),
-  build_props: z
-    .union([z.record(z.string()), z.array(z.string())])
-    .optional()
-    .transform((value) => {
-      if (!value) {
-        return [] as string[];
-      }
-      if (Array.isArray(value)) {
-        return value;
-      }
-      return Object.entries(value).map(([key, val]) => `${key}=${val}`);
-    }),
+  build_props: buildPropsSchema,
   clean: z.boolean().optional().default(false),
   fqbn: z.string().optional(),
 });
@@ -434,6 +490,22 @@ const pdcaSchema = compileSchema.merge(
     baud: z.number().int().positive().optional().default(115200),
   }),
 );
+
+const ensureDependenciesSchema = z.object({
+  install_missing: z.boolean().optional().default(true),
+});
+
+const flashConnectedSchema = z.object({
+  sketch_path: z.string(),
+  fqbn: z.string().optional(),
+  build_props: buildPropsSchema,
+  max_ports: z.number().int().positive().max(10).optional().default(10),
+});
+
+const startConsoleSchema = z.object({
+  host: z.string().optional().default('127.0.0.1'),
+  port: z.number().int().positive().optional().default(4173),
+});
 
 function toToolResult(data: unknown, message?: string): CallToolResult {
   const structured = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : undefined;
@@ -517,6 +589,536 @@ async function resolveSketchPath(sketchPath: string): Promise<string> {
   }
   return absolute;
 }
+
+interface ArduinoCliStatus {
+  ok: boolean;
+  path?: string;
+  version?: string;
+  source: 'env' | 'vendor' | 'system';
+  installed: boolean;
+  installedNow?: boolean;
+  message?: string;
+}
+
+interface PythonStatus {
+  ok: boolean;
+  path?: string;
+  version?: string;
+  pyserialInstalled: boolean;
+  installedPyserial?: boolean;
+  createdVenv?: boolean;
+  message?: string;
+}
+
+interface DependencyReport {
+  ok: boolean;
+  arduinoCli: ArduinoCliStatus;
+  python: PythonStatus;
+}
+
+interface SerialEventPayload {
+  type: 'serial' | 'serial_end';
+  token?: string;
+  port?: string;
+  line?: string;
+  raw?: boolean;
+  encoding?: string;
+  timestamp?: string;
+  lineNumber?: number;
+  baud?: number;
+  stream?: 'stderr';
+  reason?: string;
+  elapsedSeconds?: number;
+  rebootDetected?: boolean;
+  lastLine?: string;
+  exitCode?: number;
+}
+
+function timestampSlug(date = new Date()): string {
+  const pad = (value: number) => value.toString().padStart(2, '0');
+  return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}-${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
+}
+
+class DependencyManager {
+  async ensureArduinoCli(options: { installMissing: boolean }): Promise<ArduinoCliStatus> {
+    const installMissing = options.installMissing;
+    let source: ArduinoCliStatus['source'] = process.env.ARDUINO_CLI
+      ? 'env'
+      : fsSync.existsSync(VENDOR_ARDUINO_BIN)
+        ? 'vendor'
+        : 'system';
+    let candidate = resolveArduinoCliExecutable();
+    let available = await this.isExecutableAvailable(candidate);
+    let installedNow = false;
+    let message: string | undefined;
+
+    if (!available && installMissing) {
+      const install = await this.installArduinoCli();
+      if (install.ok && install.path) {
+        candidate = install.path;
+        source = 'vendor';
+        available = true;
+        installedNow = true;
+      } else if (install.message) {
+        message = install.message;
+      } else {
+        message = 'Failed to install arduino-cli into vendor directory.';
+      }
+    } else if (!available) {
+      message = 'arduino-cli not found. Set ARDUINO_CLI or allow installation via ensure_dependencies.';
+    }
+
+    if (available) {
+      updateArduinoCliPath(candidate);
+    }
+
+    const version = available ? await this.readArduinoCliVersion(candidate) : undefined;
+    return {
+      ok: available,
+      path: available ? candidate : undefined,
+      version,
+      source,
+      installed: available,
+      installedNow,
+      message,
+    };
+  }
+
+  private getArduinoCliDownloadInfo(): { url: string; archiveName: string } {
+    const base = 'https://downloads.arduino.cc/arduino-cli';
+    const platform = process.platform;
+    const arch = process.arch;
+    if (platform === 'darwin' && arch === 'arm64') {
+      return { url: `${base}/arduino-cli_latest_macOS_arm64.tar.gz`, archiveName: 'arduino-cli_latest_macOS_arm64.tar.gz' };
+    }
+    if (platform === 'darwin') {
+      return { url: `${base}/arduino-cli_latest_macOS_64bit.tar.gz`, archiveName: 'arduino-cli_latest_macOS_64bit.tar.gz' };
+    }
+    if (platform === 'linux' && arch === 'arm64') {
+      return { url: `${base}/arduino-cli_latest_Linux_ARM64.tar.gz`, archiveName: 'arduino-cli_latest_Linux_ARM64.tar.gz' };
+    }
+    if (platform === 'linux') {
+      return { url: `${base}/arduino-cli_latest_Linux_64bit.tar.gz`, archiveName: 'arduino-cli_latest_Linux_64bit.tar.gz' };
+    }
+    throw new Error(`Unsupported platform for automatic arduino-cli install: ${platform}/${arch}`);
+  }
+
+  private async installArduinoCli(): Promise<{ ok: boolean; path?: string; version?: string; message?: string }> {
+    try {
+      const { url, archiveName } = this.getArduinoCliDownloadInfo();
+      await ensureDirectory(VENDOR_ARDUINO_DIR);
+      const archivePath = path.join(VENDOR_ARDUINO_DIR, archiveName);
+      const download = await execa('curl', ['-L', url, '-o', archivePath], { reject: false });
+      if (download.exitCode !== 0) {
+        return { ok: false, message: `Download failed (${download.exitCode}): ${download.stderr || download.stdout}` };
+      }
+      const extract = await execa('tar', ['-xzf', archivePath, '-C', VENDOR_ARDUINO_DIR], { reject: false });
+      await fs.rm(archivePath, { force: true });
+      if (extract.exitCode !== 0) {
+        return { ok: false, message: `Extract failed (${extract.exitCode}): ${extract.stderr || extract.stdout}` };
+      }
+      const binPath = VENDOR_ARDUINO_BIN;
+      if (!(await pathExists(binPath))) {
+        return { ok: false, message: `arduino-cli binary not found at ${binPath} after extraction` };
+      }
+      await fs.chmod(binPath, 0o755);
+      const version = await this.readArduinoCliVersion(binPath);
+      return { ok: true, path: binPath, version };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return { ok: false, message };
+    }
+  }
+
+  private async isExecutableAvailable(executable: string): Promise<boolean> {
+    if (!executable) {
+      return false;
+    }
+    if (executable.includes(path.sep)) {
+      try {
+        await fs.access(executable, fsSync.constants.X_OK);
+        return true;
+      } catch (error) {
+        return false;
+      }
+    }
+    const which = await execa('which', [executable], { reject: false });
+    return which.exitCode === 0 && Boolean(which.stdout.trim());
+  }
+
+  private async readArduinoCliVersion(executable: string): Promise<string | undefined> {
+    const result = await execa(executable, ['version', '--json'], { reject: false });
+    if (result.exitCode === 0) {
+      try {
+        const parsed = JSON.parse(result.stdout);
+        return parsed.VersionString ?? parsed.version ?? undefined;
+      } catch (error) {
+        // ignore JSON parse failure
+      }
+    }
+    const fallback = await execa(executable, ['version'], { reject: false });
+    return fallback.stdout?.trim() || fallback.stderr?.trim() || undefined;
+  }
+
+  async ensurePython(options: { installMissing: boolean }): Promise<PythonStatus> {
+    const installMissing = options.installMissing;
+    const defaultPython = resolvePythonExecutable();
+    let pythonPath = defaultPython;
+    let available = await this.isExecutableAvailable(pythonPath);
+    let createdVenv = false;
+    let message: string | undefined;
+
+    if (!available && installMissing) {
+      const basePython = process.env.MCP_PYTHON ?? 'python3';
+      await ensureDirectory(VENV_DIR);
+      const create = await execa(basePython, ['-m', 'venv', VENV_DIR], { reject: false });
+      if (create.exitCode === 0) {
+        pythonPath = path.resolve(VENV_DIR, process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+        available = await this.isExecutableAvailable(pythonPath);
+        createdVenv = true;
+        updatePythonExecutable(pythonPath);
+      } else {
+        message = `Failed to create venv with ${basePython}: ${create.stderr || create.stdout}`.trim();
+      }
+    }
+
+    if (!available) {
+      return {
+        ok: false,
+        path: pythonPath,
+        version: undefined,
+        pyserialInstalled: false,
+        installedPyserial: false,
+        createdVenv,
+        message: message ?? 'Python executable not found. Set MCP_PYTHON or allow virtualenv creation.',
+      };
+    }
+
+    const version = await this.readPythonVersion(pythonPath);
+    const pyserialCheck = await execa(pythonPath, ['-m', 'pip', 'show', 'pyserial'], { reject: false });
+    let pyserialInstalled = pyserialCheck.exitCode === 0;
+    let installedPyserial = false;
+    if (!pyserialInstalled && installMissing) {
+      const install = await execa(pythonPath, ['-m', 'pip', 'install', 'pyserial'], { reject: false });
+      pyserialInstalled = install.exitCode === 0;
+      installedPyserial = install.exitCode === 0;
+      if (!pyserialInstalled && !message) {
+        message = `Failed to install pyserial: ${install.stderr || install.stdout}`.trim();
+      }
+    }
+
+    return {
+      ok: available && pyserialInstalled,
+      path: pythonPath,
+      version,
+      pyserialInstalled,
+      installedPyserial,
+      createdVenv,
+      message,
+    };
+  }
+
+  private async readPythonVersion(pythonPath: string): Promise<string | undefined> {
+    const result = await execa(pythonPath, ['--version'], { reject: false });
+    if (result.exitCode === 0) {
+      return result.stdout?.trim() || result.stderr?.trim() || undefined;
+    }
+    return undefined;
+  }
+
+  async ensureAll(options: { installMissing: boolean }): Promise<DependencyReport> {
+    const installMissing = options.installMissing;
+    const arduinoCli = await this.ensureArduinoCli({ installMissing });
+    const python = await this.ensurePython({ installMissing });
+    return {
+      ok: arduinoCli.ok && python.ok,
+      arduinoCli,
+      python,
+    };
+  }
+}
+
+const dependencyManager = new DependencyManager();
+
+class SerialBroadcaster {
+  private clients = new Set<http.ServerResponse>();
+  private keepAliveTimer?: NodeJS.Timeout;
+  private buffer: SerialEventPayload[] = [];
+  private bufferLimit = 500;
+
+  addClient(res: http.ServerResponse) {
+    this.clients.add(res);
+    this.flushBuffer(res);
+    this.ensureKeepAlive();
+  }
+
+  removeClient(res: http.ServerResponse) {
+    this.clients.delete(res);
+    if (this.clients.size === 0 && this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = undefined;
+    }
+  }
+
+  broadcast(event: SerialEventPayload) {
+    const data = `data: ${JSON.stringify(event)}\n\n`;
+    for (const client of this.clients) {
+      client.write(data);
+    }
+    this.buffer.push(event);
+    if (this.buffer.length > this.bufferLimit) {
+      this.buffer.splice(0, this.buffer.length - this.bufferLimit);
+    }
+  }
+
+  private flushBuffer(res: http.ServerResponse) {
+    for (const event of this.buffer) {
+      res.write(`data: ${JSON.stringify(event)}\n\n`);
+    }
+  }
+
+  private ensureKeepAlive() {
+    if (this.keepAliveTimer) {
+      return;
+    }
+    this.keepAliveTimer = setInterval(() => {
+      const heartbeat = `: keep-alive ${Date.now()}\n\n`;
+      for (const client of this.clients) {
+        client.write(heartbeat);
+      }
+    }, 15000);
+  }
+}
+
+const serialBroadcaster = new SerialBroadcaster();
+
+const CONSOLE_HTML = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ESP32 Serial Console</title>
+  <style>
+    :root { color-scheme: light dark; }
+    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0b1220; color: #e8ecf2; }
+    header { padding: 12px 16px; background: #101a2e; border-bottom: 1px solid #1f2c45; position: sticky; top: 0; z-index: 2; }
+    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    input { background: #0f172a; color: #e8ecf2; border: 1px solid #1f2c45; border-radius: 6px; padding: 8px 10px; min-width: 0; }
+    button { background: #1e3a8a; color: #e8ecf2; border: 1px solid #26479f; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    main { padding: 12px 14px 28px; }
+    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
+    .panel { border: 1px solid #1f2c45; border-radius: 10px; background: #0f172a; min-height: 160px; display: flex; flex-direction: column; }
+    .panel-header { padding: 8px 10px; border-bottom: 1px solid #1f2c45; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
+    .panel-title { font-weight: 600; font-size: 14px; }
+    .panel-body { padding: 8px 10px 12px; overflow-y: auto; max-height: 320px; font-family: SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace; font-size: 13px; }
+    .line { padding: 2px 6px; border-radius: 4px; margin-bottom: 2px; }
+    .stderr { color: #f87171; }
+    .muted { color: #94a3b8; font-size: 12px; }
+    .pill { padding: 2px 6px; border-radius: 999px; border: 1px solid #26479f; background: #132043; color: #e8ecf2; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="toolbar">
+      <span>ESP32 Serial Console (SSE)</span>
+      <input id="textFilter" placeholder="global text filter (regex optional)" />
+      <input id="alertFilter" placeholder="alert filter (regex)" />
+      <button id="clearBtn">Clear all</button>
+      <button id="stopBtn">Stop stream</button>
+      <button id="startBtn">Start stream</button>
+      <span class="muted" id="status">connecting...</span>
+    </div>
+  </header>
+  <main>
+    <div class="muted" id="portsInfo"></div>
+    <div class="grid" id="panelGrid"></div>
+    <div class="panel" style="margin-top:12px;">
+      <div class="panel-header">
+        <div class="panel-title">Alerts</div>
+        <div class="pill" id="alertCount">0</div>
+        <button id="clearAlerts">Clear</button>
+      </div>
+      <div class="panel-body" id="alertsBody" style="max-height:200px;"></div>
+    </div>
+  </main>
+  <script>
+    const panelGrid = document.getElementById('panelGrid');
+    const portsInfo = document.getElementById('portsInfo');
+    const textFilter = document.getElementById('textFilter');
+    const statusEl = document.getElementById('status');
+    const alertFilter = document.getElementById('alertFilter');
+    const clearBtn = document.getElementById('clearBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const startBtn = document.getElementById('startBtn');
+    const clearAlerts = document.getElementById('clearAlerts');
+    const alertsBody = document.getElementById('alertsBody');
+    const alertCount = document.getElementById('alertCount');
+    let regex = null;
+    let alertRegex = null;
+    let es = null;
+    textFilter.addEventListener('input', () => {
+      const val = textFilter.value.trim();
+      try { regex = val ? new RegExp(val, 'i') : null; textFilter.style.borderColor = '#1f2c45'; }
+      catch { regex = null; textFilter.style.borderColor = '#f87171'; }
+    });
+    alertFilter.addEventListener('input', () => {
+      const val = alertFilter.value.trim();
+      try { alertRegex = val ? new RegExp(val, 'i') : null; alertFilter.style.borderColor = '#1f2c45'; }
+      catch { alertRegex = null; alertFilter.style.borderColor = '#f87171'; }
+    });
+    clearBtn.addEventListener('click', () => { portPanels.clearAll(); });
+    clearAlerts.addEventListener('click', () => { alertsBody.innerHTML=''; alertCount.textContent='0'; });
+    stopBtn.addEventListener('click', () => disconnect());
+    startBtn.addEventListener('click', () => reconnect());
+
+    class PortPanels {
+      constructor() {
+        this.panels = new Map(); // port -> {container, body, buffer}
+      }
+      ensure(port) {
+        if (this.panels.has(port)) return this.panels.get(port);
+        const wrapper = document.createElement('div');
+        wrapper.className = 'panel';
+        const header = document.createElement('div');
+        header.className = 'panel-header';
+        const title = document.createElement('div');
+        title.className = 'panel-title';
+        title.textContent = port;
+        const clearBtn = document.createElement('button');
+        clearBtn.textContent = 'Clear';
+        clearBtn.onclick = () => body.innerHTML = '';
+        header.appendChild(title);
+        header.appendChild(clearBtn);
+        const body = document.createElement('div');
+        body.className = 'panel-body';
+        wrapper.appendChild(header);
+        wrapper.appendChild(body);
+        panelGrid.appendChild(wrapper);
+        const panel = { container: wrapper, body, buffer: [] };
+        this.panels.set(port, panel);
+        this.updatePortsInfo();
+        return panel;
+      }
+      updatePortsInfo() {
+        const ports = Array.from(this.panels.keys());
+        portsInfo.textContent = ports.length ? 'Ports: ' + ports.join(', ') : 'Ports: none';
+      }
+      append(evt) {
+        const port = evt.port || 'unknown';
+        const panel = this.ensure(port);
+        const text = this.formatText(evt);
+        if (regex && !regex.test(text)) return;
+        const div = document.createElement('div');
+        div.className = 'line' + (evt.stream === 'stderr' ? ' stderr' : '');
+        const eventTs = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '';
+        const systemTs = new Date().toLocaleTimeString();
+        const prefix = systemTs + (eventTs ? ' [' + eventTs + ']' : '');
+        div.textContent = prefix + ' ' + text;
+        panel.body.appendChild(div);
+        while (panel.body.childElementCount > 1000) { panel.body.removeChild(panel.body.firstChild); }
+        div.scrollIntoView({ block: 'end' });
+        if (alertRegex && alertRegex.test(text)) {
+          const alertDiv = document.createElement('div');
+          alertDiv.className = 'line';
+          alertDiv.textContent = prefix + ' ' + text;
+          alertsBody.appendChild(alertDiv);
+          while (alertsBody.childElementCount > 200) { alertsBody.removeChild(alertsBody.firstChild); }
+          alertCount.textContent = String(alertsBody.childElementCount);
+          alertDiv.scrollIntoView({ block: 'end' });
+        }
+      }
+      clearAll() {
+        for (const panel of this.panels.values()) {
+          panel.body.innerHTML = '';
+        }
+      }
+      formatText(evt) {
+        const portLabel = '[' + (evt.port || 'unknown') + '] ';
+        if (evt.type === 'serial_end') {
+          return portLabel + '<end> reason=' + (evt.reason || 'unknown') + ' reboot=' + (evt.rebootDetected ? 'yes' : 'no') + ' lines=' + (evt.lineNumber || '');
+        }
+        if (evt.raw && evt.encoding === 'base64') {
+          return portLabel + '<raw ' + (evt.encoding || '') + '>';
+        }
+        return portLabel + (evt.line ?? '');
+      }
+    }
+
+    const portPanels = new PortPanels();
+
+    function connect() {
+      if (es) { es.close(); }
+      es = new EventSource('/events');
+      es.onopen = () => { statusEl.textContent = 'connected'; };
+      es.onerror = () => { statusEl.textContent = 'disconnected (retrying)'; };
+      es.onmessage = (ev) => {
+        try {
+          const data = JSON.parse(ev.data);
+          if (data.type === 'serial' || data.type === 'serial_end') {
+            portPanels.append(data);
+          }
+        } catch (e) { /* ignore */ }
+      };
+    }
+    function disconnect() {
+      if (es) { es.close(); es = null; }
+      statusEl.textContent = 'stopped';
+    }
+    function reconnect() {
+      connect();
+    }
+    connect();
+  </script>
+</body>
+</html>`;
+
+class ConsoleServer {
+  private server?: http.Server;
+  private options: { host: string; port: number } | null = null;
+
+  start(options: { host: string; port: number }) {
+    if (this.server && this.options && this.options.host === options.host && this.options.port === options.port) {
+      return { ok: true, alreadyRunning: true, ...options };
+    }
+    if (this.server) {
+      this.server.close();
+      this.server = undefined;
+    }
+
+    this.server = http.createServer((req, res) => this.handleRequest(req, res));
+    this.options = options;
+    this.server.listen(options.port, options.host);
+    return { ok: true, host: options.host, port: options.port };
+  }
+
+  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    if (!req.url) {
+      res.writeHead(404); res.end(); return;
+    }
+    if (req.url.startsWith('/events')) {
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        Connection: 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.write(': connected\n\n');
+      serialBroadcaster.addClient(res);
+      req.on('close', () => serialBroadcaster.removeClient(res));
+      return;
+    }
+    if (req.url.startsWith('/health')) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(CONSOLE_HTML);
+  }
+}
+
+const consoleServer = new ConsoleServer();
 
 const SOURCE_FILE_EXTS = new Set(['.ino', '.pde', '.cpp', '.cc', '.c', '.cxx', '.s', '.S']);
 const HEADER_EXTS = new Set(['.h', '.hh', '.hpp', '.hxx']);
@@ -912,6 +1514,76 @@ async function runUpload(args: z.infer<typeof uploadSchema>): Promise<UploadSumm
   };
 }
 
+async function detectEsp32Ports(maxPorts: number): Promise<{
+  ok: boolean;
+  ports: DetectedPortInfo[];
+  raw?: unknown;
+  stdout?: string;
+  stderr?: string;
+}> {
+  const result = await cli.run(['board', 'list', '--format', 'json']);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(result.stdout);
+  } catch (error) {
+    parsed = undefined;
+  }
+
+  const ports: DetectedPortInfo[] = [];
+  const entries = Array.isArray((parsed as { ports?: unknown[] } | undefined)?.ports)
+    ? ((parsed as { ports?: unknown[] }).ports as Array<Record<string, unknown>>)
+    : [];
+
+  for (const entry of entries) {
+    const address = (entry.address as string | undefined)
+      ?? (entry.port as string | undefined)
+      ?? (entry.address_label as string | undefined)
+      ?? (entry.com_name as string | undefined);
+    if (!address) {
+      continue;
+    }
+    const boardsRaw = [
+      ...(Array.isArray(entry.matching_boards) ? entry.matching_boards : []),
+      ...(Array.isArray(entry.boards) ? entry.boards : []),
+    ] as Array<Record<string, unknown>>;
+    const matching = boardsRaw.find((board) => {
+      const name = (board.FQBN as string | undefined)
+        ?? (board.fqbn as string | undefined)
+        ?? (board.name as string | undefined)
+        ?? (board.boardName as string | undefined)
+        ?? '';
+      return name.toLowerCase().includes('esp32');
+    });
+    const matchingFqbn = (matching?.FQBN as string | undefined)
+      ?? (matching?.fqbn as string | undefined)
+      ?? (matching?.name as string | undefined)
+      ?? (matching?.boardName as string | undefined);
+
+    ports.push({
+      port: address,
+      protocol: (entry.protocol as string | undefined) ?? (entry.protocol_label as string | undefined),
+      label: (entry.label as string | undefined)
+        ?? (entry.address_label as string | undefined)
+        ?? (entry.identification as string | undefined)
+        ?? (entry.port_label as string | undefined),
+      product: (entry.properties as { product?: string } | undefined)?.product,
+      vendor: (entry.properties as { vendor?: string } | undefined)?.vendor,
+      matchingFqbn,
+      isEsp32: Boolean(matching),
+      reachable: fsSync.existsSync(address),
+    });
+  }
+
+  const esp32Ports = ports.filter((port) => port.isEsp32).slice(0, Math.max(1, maxPorts));
+  return {
+    ok: result.exitCode === 0 && esp32Ports.length > 0,
+    ports: esp32Ports,
+    raw: parsed,
+    stdout: result.stdout,
+    stderr: result.stderr,
+  };
+}
+
 async function safeNotify(method: string, params: Record<string, unknown>) {
   try {
     await server.server.notification({ method, params });
@@ -999,6 +1671,17 @@ class MonitorSession {
         const line = chunk.toString('base64');
         this.lastLine = line;
         this.lines += 1;
+        serialBroadcaster.broadcast({
+          type: 'serial',
+          token: this.token,
+          port: this.options.port,
+          line,
+          raw: true,
+          encoding: 'base64',
+          timestamp: new Date().toISOString(),
+          lineNumber: this.lines,
+          baud: this.selectedBaud,
+        });
         safeNotify('event/serial', {
           token: this.token,
           port: this.options.port,
@@ -1019,6 +1702,16 @@ class MonitorSession {
         if (this.options.detectReboot && REBOOT_PATTERNS.some((pattern) => pattern.test(line))) {
           this.rebootDetected = true;
         }
+        serialBroadcaster.broadcast({
+          type: 'serial',
+          token: this.token,
+          port: this.options.port,
+          line,
+          raw: false,
+          timestamp: new Date().toISOString(),
+          lineNumber: this.lines,
+          baud: this.selectedBaud,
+        });
         safeNotify('event/serial', {
           token: this.token,
           port: this.options.port,
@@ -1041,6 +1734,16 @@ class MonitorSession {
 
     child.stderr?.on('data', (chunk: Buffer) => {
       const line = chunk.toString('utf8');
+      serialBroadcaster.broadcast({
+        type: 'serial',
+        token: this.token,
+        port: this.options.port,
+        line,
+        raw: false,
+        stream: 'stderr',
+        timestamp: new Date().toISOString(),
+        baud: this.selectedBaud,
+      });
       safeNotify('event/serial', {
         token: this.token,
         port: this.options.port,
@@ -1236,6 +1939,16 @@ class MonitorSession {
       resolve(summary);
     }
     const payload: Record<string, unknown> = { ...summary };
+    serialBroadcaster.broadcast({
+      type: 'serial_end',
+      token: this.token,
+      port: this.options.port,
+      reason: this.stopReason,
+      elapsedSeconds: summary.elapsedSeconds,
+      rebootDetected: summary.rebootDetected,
+      lastLine: summary.lastLine,
+      exitCode: summary.exitCode,
+    });
     safeNotify('event/serial_end', payload).catch(() => undefined);
   }
 }
@@ -1412,6 +2125,82 @@ async function runPdca(args: z.infer<typeof pdcaSchema>) {
   });
 }
 
+async function runEnsureDependencies(args: z.infer<typeof ensureDependenciesSchema>) {
+  const report = await dependencyManager.ensureAll({ installMissing: args.install_missing });
+  const message = report.ok ? 'Dependencies are ready.' : 'Dependency verification failed.';
+  return toToolResult({ ok: report.ok, report }, message);
+}
+
+async function runFlashConnected(args: z.infer<typeof flashConnectedSchema>) {
+  const dependencies = await dependencyManager.ensureAll({ installMissing: true });
+  if (!dependencies.ok) {
+    return toToolResult({ ok: false, stage: 'dependencies', dependencies }, 'Dependency setup failed. See report.');
+  }
+
+  const detection = await detectEsp32Ports(args.max_ports);
+  if (detection.ports.length === 0) {
+    const message = detection.ok ? 'No ESP32 devices detected on USB ports.' : 'Board detection failed. See stdout/stderr.';
+    return toToolResult({ ok: false, stage: 'detect', detection }, message);
+  }
+
+  await ensureDirectory(TEMP_DIR);
+  const buildPath = path.join(TEMP_DIR, timestampSlug());
+  const compileResult = await runCompile({
+    sketch_path: args.sketch_path,
+    export_bin: true,
+    build_props: args.build_props,
+    build_path: buildPath,
+    clean: true,
+    fqbn: args.fqbn,
+  });
+  if (!compileResult.ok) {
+    return toToolResult({ ok: false, stage: 'compile', detection, compile: compileResult, build_path: buildPath }, 'Compile failed');
+  }
+
+  const uploads = await Promise.all(
+    detection.ports.map(async (port) => {
+      const uploadResult = await runUpload({
+        sketch_path: args.sketch_path,
+        port: port.port,
+        fqbn: args.fqbn,
+        verify: false,
+        build_path: compileResult.buildPath,
+      });
+      return { port: port.port, ok: uploadResult.ok, upload: uploadResult };
+    }),
+  );
+
+  const successCount = uploads.filter((entry) => entry.ok).length;
+  const allOk = uploads.length > 0 && successCount === uploads.length;
+  const message = allOk
+    ? `Uploaded firmware to ${uploads.length} ESP32 board(s).`
+    : `Uploaded to ${successCount}/${uploads.length} board(s); check upload results.`;
+
+  return toToolResult(
+    {
+      ok: allOk,
+      stage: 'flash_connected',
+      build_path: compileResult.buildPath,
+      temp_dir: TEMP_DIR,
+      detection,
+      compile: compileResult,
+      uploads,
+      dependencies,
+    },
+    message,
+  );
+}
+
+async function runStartConsole(args: z.infer<typeof startConsoleSchema>) {
+  try {
+    const result = consoleServer.start({ host: args.host, port: args.port });
+    return toToolResult({ ok: true, server: result }, `Console server listening on http://${result.host}:${result.port}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return toToolResult({ ok: false, error: message }, message);
+  }
+}
+
 server.registerTool('version', {
   title: 'arduino-cli version',
   description: 'Show the installed arduino-cli version in JSON when available',
@@ -1421,6 +2210,18 @@ server.registerTool('ensure_core', {
   title: 'Ensure ESP32 core',
   description: 'Install esp32:esp32 platform if missing',
 }, async () => ensureEsp32Core());
+
+server.registerTool('ensure_dependencies', {
+  title: 'Ensure Arduino Dependencies',
+  description: 'Bundle arduino-cli into vendor/, ensure .venv with pyserial, and report versions',
+  inputSchema: ensureDependenciesSchema.shape,
+}, async (params) => runEnsureDependencies(ensureDependenciesSchema.parse(params)));
+
+server.registerTool('start_console', {
+  title: 'Start Serial Console (SSE)',
+  description: 'Launch a local SSE console at http://<host>:<port> for real-time serial logs',
+  inputSchema: startConsoleSchema.shape,
+}, async (params) => runStartConsole(startConsoleSchema.parse(params)));
 
 server.registerTool('board_list', {
   title: 'List Boards',
@@ -1543,12 +2344,36 @@ server.registerTool('pdca_cycle', {
   inputSchema: pdcaSchema.shape,
 }, async (params) => runPdca(pdcaSchema.parse(params)));
 
+server.registerTool('flash_connected', {
+  title: 'Auto Flash Connected ESP32 Boards',
+  description: 'Detect connected ESP32 USB serial ports (<=10), compile into Temp/<timestamp>, and upload in parallel',
+  inputSchema: flashConnectedSchema.shape,
+}, async (params) => runFlashConnected(flashConnectedSchema.parse(params)));
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+if (!process.env.MCP_SKIP_MAIN) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}
+
+export function startConsoleStandalone(options?: { host?: string; port?: number }) {
+  const host = options?.host ?? '127.0.0.1';
+  const port = options?.port ?? 4173;
+  return consoleServer.start({ host, port });
+}
+
+export async function startMonitorStandalone(options: Partial<z.infer<typeof monitorStartSchema>> & { port: string }) {
+  const parsed = monitorStartSchema.parse({
+    ...options,
+    port: options.port,
+  });
+  const session = await monitorManager.start(parsed);
+  const summary = await session.onComplete();
+  return summary;
+}
