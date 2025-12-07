@@ -15,6 +15,20 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 
+// New modular imports (Phase 2 migration)
+import { createLogger } from './utils/logger.js';
+
+// Re-export new modules for external use
+export * from './types.js';
+export * from './mcp/schemas.js';
+export * from './config/index.js';
+export * from './serial/index.js';
+export * from './console/index.js';
+export * from './utils/index.js';
+
+// Logger instance for this module
+const logger = createLogger('MCPServer');
+
 const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS/Linux/Windows. Tools provided:
 
 🚀 QUICKSTART (recommended for beginners):
@@ -124,7 +138,7 @@ async function loadWorkspaceConfig(): Promise<WorkspaceConfig> {
       workspaceConfig = { ...DEFAULT_CONFIG, ...loaded };
     }
   } catch (e) {
-    console.error('Failed to load config:', e);
+    logger.error('Failed to load config', { error: String(e) });
   }
   return workspaceConfig;
 }
