@@ -2,10 +2,28 @@
 
 このサーバーは標準入出力のMCPサーバーです。以下は各クライアントでの導入例と、リアルタイムシリアルコンソールの利用手順です。
 
+## 🚀 クイックスタート（推奨）
+
+ESP32開発が初めての方は、MCP接続後に以下を実行するだけで始められます：
+
+```json
+{ "name": "quickstart", "arguments": {} }
+```
+
+これにより自動的に：
+1. arduino-cli をダウンロード＆インストール
+2. Python 仮想環境 + pyserial をセットアップ
+3. ESP32 コアをインストール
+4. 接続されたESP32ボードを検出
+5. Blink サンプルスケッチをコンパイル＆アップロード
+6. シリアル出力を10秒間モニタリング
+
+すべてが正常に動作すれば、ESP32のLED（GPIO 2）が点滅し、シリアル出力に「LED ON」「LED OFF」が表示されます。
+
 ## 前提
 - Node.js 18+
+- Python 3.x（`ensure_dependencies` で自動セットアップ可）
 - `npm install` 済み
-- `ensure_dependencies` で `arduino-cli` の vendor 配置と `.venv` + `pyserial` を整備可能
 
 ## 共通: MCP サーバー起動
 ```bash
@@ -38,12 +56,35 @@ npx mcp-arduino-esp32
 ```
 `PATH` に `arduino-cli`（もしくは vendor 配置先）が含まれるようにしてください。
 
+## Windows 設定例
+`.mcp.json` または `.cursor/mcp.json`
+```json
+{
+  "mcpServers": {
+    "mcp-arduino-esp32": {
+      "command": "mcp-arduino-esp32",
+      "env": {
+        "PATH": "C:\\Program Files\\nodejs;%PATH%"
+      }
+    }
+  }
+}
+```
+
 ## ツールのよく使う順序
+
+### 初心者向け（1コマンドで完結）
+```json
+{ "name": "quickstart", "arguments": {} }
+```
+
+### 詳細な手順
 1. `ensure_dependencies` … vendor 配下に `arduino-cli`、`.venv` に `pyserial` を用意
 2. `ensure_core` … ESP32 コアをインストール
-3. `flash_connected` … 接続ESP32(最大10)へビルド＆並列アップロード
-4. `monitor_start` … 個別ポートでシリアル取得（`auto_baud` 推奨）
-5. `start_console` … ローカルSSEコンソール起動（リアルタイム閲覧用）
+3. `board_list` … 接続ボードを確認
+4. `flash_connected` … 接続ESP32(最大10)へビルド＆並列アップロード
+5. `monitor_start` … 個別ポートでシリアル取得（`auto_baud` 推奨）
+6. `start_console` … ローカルSSEコンソール起動（リアルタイム閲覧用）
 
 ## リアルタイムシリアルコンソールの使い方
 1. `start_console` を呼び出す（例）
@@ -69,11 +110,29 @@ npx mcp-arduino-esp32
 - 出力量が多い場合はテキストフィルタ/ポートフィルタで負荷を抑制できます。
 
 ## 代表的な JSON 呼び出し例
-- 依存関係セットアップ
+
+### クイックスタート（推奨）
+```json
+{ "name": "quickstart", "arguments": {} }
+```
+
+### 既存スケッチでクイックスタート
+```json
+{
+  "name": "quickstart",
+  "arguments": {
+    "sketch_path": "~/Arduino/my-sketch",
+    "monitor_seconds": 30
+  }
+}
+```
+
+### 依存関係セットアップ
 ```json
 { "name": "ensure_dependencies", "arguments": { "install_missing": true } }
 ```
-- 複数ESP32への並列フラッシュ
+
+### 複数ESP32への並列フラッシュ
 ```json
 {
   "name": "flash_connected",
@@ -83,13 +142,29 @@ npx mcp-arduino-esp32
   }
 }
 ```
-- 単体ポートでの監視
+
+### 単体ポートでの監視
 ```json
 { "name": "monitor_start", "arguments": { "port": "/dev/cu.SLAB_USBtoUART", "auto_baud": true } }
 ```
+
+### コンパイル→アップロード→監視（一括）
+```json
+{
+  "name": "pdca_cycle",
+  "arguments": {
+    "sketch_path": "~/Arduino/my-sketch",
+    "port": "/dev/cu.usbserial-0001",
+    "monitor_seconds": 15
+  }
+}
+```
+
 - コンソール停止はブラウザを閉じるだけでOK。モニタ停止は `monitor_stop` を利用。
 
 ## トラブルシュート
-- シリアルが読めない: `auto_baud: true` で試す／USBケーブル・権限を確認。
-- コンソール無反応: `start_console` が起動済みか確認。`http://host:port/health` で `{ ok: true }` が返るか。
-- 依存が見つからない: `ensure_dependencies` を実行、もしくは `ARDUINO_CLI` / `MCP_PYTHON` を明示する。
+- **シリアルが読めない**: `auto_baud: true` で試す／USBケーブル・権限を確認。
+- **コンソール無反応**: `start_console` が起動済みか確認。`http://host:port/health` で `{ ok: true }` が返るか。
+- **依存が見つからない**: `ensure_dependencies` を実行、もしくは `ARDUINO_CLI` / `MCP_PYTHON` を明示する。
+- **Windows でエラー**: PowerShell が利用可能か確認。`ensure_dependencies` は PowerShell を使って arduino-cli をダウンロード・展開します。
+- **ESP32が検出されない**: USBケーブルがデータ転送対応か確認（充電専用ケーブルでは認識されません）。ドライバ（CP210x/CH340）がインストールされているか確認。

@@ -15,19 +15,37 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import pkg from '../package.json' with { type: 'json' };
 
-const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS. Tools provided:
-- version: show arduino-cli version (JSON when available)
+const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS/Linux/Windows. Tools provided:
+
+🚀 QUICKSTART (recommended for beginners):
+- quickstart: One-click setup that installs everything, detects ESP32, compiles a blink example, uploads it, and shows serial output
+
+📦 SETUP:
+- ensure_dependencies: bundle arduino-cli + python(.venv) with pyserial
 - ensure_core: install esp32:esp32 core if missing
-- board_list: list detected serial ports via arduino-cli
-- lib_install / lib_list: manage libraries with arduino-cli
+- version: show arduino-cli version
+
+🔧 BUILD & UPLOAD:
 - compile: run arduino-cli compile with diagnostics + artifact listing
 - upload: flash sketch to board via arduino-cli upload
+- pdca_cycle: compile -> upload -> monitor in a single run
+- flash_connected: detect ESP32 boards (<=10), compile and upload in parallel
+- erase_flash: completely erase ESP32 flash memory before fresh install
+- spiffs_upload: upload data directory to ESP32 SPIFFS partition
 - list_artifacts: enumerate .bin/.elf/.map/.hex under build path
+
+📡 SERIAL MONITORING:
 - monitor_start / monitor_stop: stream serial output with stop conditions + reboot detection
-- pdca_cycle: compile -> upload -> monitor in a single run (useful for automated PDCA)
-- ensure_dependencies: bundle arduino-cli + python(.venv) with pyserial under the project and report versions
-- flash_connected: detect ESP32 boards (<=10), compile to Temp/<timestamp>, and upload in parallel
-- start_console: launch local SSE console to stream serial logs in real-time (http://127.0.0.1:<port>)
+- start_console: launch local SSE console (http://127.0.0.1:4173) with crash/alert detection
+- get_logs: retrieve buffered serial logs for AI-driven verification
+
+🔌 BOARD & LIBRARY:
+- board_list: list detected serial ports via arduino-cli
+- lib_install / lib_list: manage libraries with arduino-cli
+
+📌 PIN UTILITIES:
+- pin_spec: ESP32-DevKitC pin specification reference
+- pin_check: validate sketch pin usage against DevKitC constraints
 
 Defaults: FQBN esp32:esp32:esp32 (override with ESP32_FQBN). arduino-cli path can be overridden via ARDUINO_CLI.`;
 
@@ -507,6 +525,32 @@ const startConsoleSchema = z.object({
   port: z.number().int().positive().optional().default(4173),
 });
 
+const libInstallSchema = z.object({
+  name: z.string().describe('Name of the Arduino library to install (e.g., "ArduinoJson" or "Adafruit NeoPixel")'),
+});
+
+const quickstartSchema = z.object({
+  sketch_path: z.string().optional().describe('Path to an existing sketch to compile and upload. If not provided, a blink example will be created.'),
+  port: z.string().optional().describe('Serial port to upload to. If not provided, will auto-detect ESP32.'),
+  monitor_seconds: z.number().positive().optional().default(10).describe('Seconds to monitor serial output after upload'),
+});
+
+const eraseFlashSchema = z.object({
+  port: z.string().describe('Serial port of the ESP32 to erase'),
+});
+
+const spiffsUploadSchema = z.object({
+  port: z.string().describe('Serial port of the ESP32'),
+  data_dir: z.string().describe('Path to the data directory to upload to SPIFFS'),
+  partition_name: z.string().optional().default('spiffs').describe('SPIFFS partition name'),
+});
+
+const getLogsSchema = z.object({
+  port: z.string().optional().describe('Filter logs by port'),
+  max_lines: z.number().int().positive().optional().default(100).describe('Maximum number of log lines to return'),
+  pattern: z.string().optional().describe('Filter logs by regex pattern'),
+});
+
 function toToolResult(data: unknown, message?: string): CallToolResult {
   const structured = typeof data === 'object' && data !== null ? (data as Record<string, unknown>) : undefined;
   const text = message ??
@@ -684,44 +728,73 @@ class DependencyManager {
     };
   }
 
-  private getArduinoCliDownloadInfo(): { url: string; archiveName: string } {
+  private getArduinoCliDownloadInfo(): { url: string; archiveName: string; isZip: boolean } {
     const base = 'https://downloads.arduino.cc/arduino-cli';
     const platform = process.platform;
     const arch = process.arch;
     if (platform === 'darwin' && arch === 'arm64') {
-      return { url: `${base}/arduino-cli_latest_macOS_arm64.tar.gz`, archiveName: 'arduino-cli_latest_macOS_arm64.tar.gz' };
+      return { url: `${base}/arduino-cli_latest_macOS_arm64.tar.gz`, archiveName: 'arduino-cli_latest_macOS_arm64.tar.gz', isZip: false };
     }
     if (platform === 'darwin') {
-      return { url: `${base}/arduino-cli_latest_macOS_64bit.tar.gz`, archiveName: 'arduino-cli_latest_macOS_64bit.tar.gz' };
+      return { url: `${base}/arduino-cli_latest_macOS_64bit.tar.gz`, archiveName: 'arduino-cli_latest_macOS_64bit.tar.gz', isZip: false };
     }
     if (platform === 'linux' && arch === 'arm64') {
-      return { url: `${base}/arduino-cli_latest_Linux_ARM64.tar.gz`, archiveName: 'arduino-cli_latest_Linux_ARM64.tar.gz' };
+      return { url: `${base}/arduino-cli_latest_Linux_ARM64.tar.gz`, archiveName: 'arduino-cli_latest_Linux_ARM64.tar.gz', isZip: false };
     }
     if (platform === 'linux') {
-      return { url: `${base}/arduino-cli_latest_Linux_64bit.tar.gz`, archiveName: 'arduino-cli_latest_Linux_64bit.tar.gz' };
+      return { url: `${base}/arduino-cli_latest_Linux_64bit.tar.gz`, archiveName: 'arduino-cli_latest_Linux_64bit.tar.gz', isZip: false };
+    }
+    if (platform === 'win32') {
+      return { url: `${base}/arduino-cli_latest_Windows_64bit.zip`, archiveName: 'arduino-cli_latest_Windows_64bit.zip', isZip: true };
     }
     throw new Error(`Unsupported platform for automatic arduino-cli install: ${platform}/${arch}`);
   }
 
   private async installArduinoCli(): Promise<{ ok: boolean; path?: string; version?: string; message?: string }> {
     try {
-      const { url, archiveName } = this.getArduinoCliDownloadInfo();
+      const { url, archiveName, isZip } = this.getArduinoCliDownloadInfo();
       await ensureDirectory(VENDOR_ARDUINO_DIR);
       const archivePath = path.join(VENDOR_ARDUINO_DIR, archiveName);
+
+      // Download using platform-appropriate method
+      if (process.platform === 'win32') {
+        // Use PowerShell on Windows
+        const psDownload = `Invoke-WebRequest -Uri '${url}' -OutFile '${archivePath}'`;
+        const download = await execa('powershell', ['-Command', psDownload], { reject: false });
+        if (download.exitCode !== 0) {
+          return { ok: false, message: `Download failed (${download.exitCode}): ${download.stderr || download.stdout}` };
+        }
+      } else {
       const download = await execa('curl', ['-L', url, '-o', archivePath], { reject: false });
       if (download.exitCode !== 0) {
         return { ok: false, message: `Download failed (${download.exitCode}): ${download.stderr || download.stdout}` };
       }
+      }
+
+      // Extract using platform-appropriate method
+      if (isZip) {
+        // Use PowerShell Expand-Archive on Windows
+        const psExtract = `Expand-Archive -Path '${archivePath}' -DestinationPath '${VENDOR_ARDUINO_DIR}' -Force`;
+        const extract = await execa('powershell', ['-Command', psExtract], { reject: false });
+        await fs.rm(archivePath, { force: true });
+        if (extract.exitCode !== 0) {
+          return { ok: false, message: `Extract failed (${extract.exitCode}): ${extract.stderr || extract.stdout}` };
+        }
+      } else {
       const extract = await execa('tar', ['-xzf', archivePath, '-C', VENDOR_ARDUINO_DIR], { reject: false });
       await fs.rm(archivePath, { force: true });
       if (extract.exitCode !== 0) {
         return { ok: false, message: `Extract failed (${extract.exitCode}): ${extract.stderr || extract.stdout}` };
       }
+      }
+
       const binPath = VENDOR_ARDUINO_BIN;
       if (!(await pathExists(binPath))) {
         return { ok: false, message: `arduino-cli binary not found at ${binPath} after extraction` };
       }
+      if (process.platform !== 'win32') {
       await fs.chmod(binPath, 0o755);
+      }
       const version = await this.readArduinoCliVersion(binPath);
       return { ok: true, path: binPath, version };
     } catch (error) {
@@ -871,6 +944,14 @@ class SerialBroadcaster {
     }
   }
 
+  getBuffer(): SerialEventPayload[] {
+    return [...this.buffer];
+  }
+
+  clearBuffer() {
+    this.buffer = [];
+  }
+
   private flushBuffer(res: http.ServerResponse) {
     for (const event of this.buffer) {
       res.write(`data: ${JSON.stringify(event)}\n\n`);
@@ -893,182 +974,1282 @@ class SerialBroadcaster {
 const serialBroadcaster = new SerialBroadcaster();
 
 const CONSOLE_HTML = `<!DOCTYPE html>
-<html lang="en">
+<html lang="ja">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>ESP32 Serial Console</title>
   <style>
-    :root { color-scheme: light dark; }
-    body { margin: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #0b1220; color: #e8ecf2; }
-    header { padding: 12px 16px; background: #101a2e; border-bottom: 1px solid #1f2c45; position: sticky; top: 0; z-index: 2; }
-    .toolbar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-    input { background: #0f172a; color: #e8ecf2; border: 1px solid #1f2c45; border-radius: 6px; padding: 8px 10px; min-width: 0; }
-    button { background: #1e3a8a; color: #e8ecf2; border: 1px solid #26479f; border-radius: 6px; padding: 8px 12px; cursor: pointer; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
-    main { padding: 12px 14px 28px; }
-    .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-    .panel { border: 1px solid #1f2c45; border-radius: 10px; background: #0f172a; min-height: 160px; display: flex; flex-direction: column; }
-    .panel-header { padding: 8px 10px; border-bottom: 1px solid #1f2c45; display: flex; justify-content: space-between; align-items: center; gap: 6px; }
-    .panel-title { font-weight: 600; font-size: 14px; }
-    .panel-body { padding: 8px 10px 12px; overflow-y: auto; max-height: 320px; font-family: SFMono-Regular, Menlo, Consolas, "Roboto Mono", monospace; font-size: 13px; }
-    .line { padding: 2px 6px; border-radius: 4px; margin-bottom: 2px; }
-    .stderr { color: #f87171; }
-    .muted { color: #94a3b8; font-size: 12px; }
-    .pill { padding: 2px 6px; border-radius: 999px; border: 1px solid #26479f; background: #132043; color: #e8ecf2; font-size: 12px; }
+    :root { 
+      --bg-dark: #0a0f1a; 
+      --bg-panel: #0d1525; 
+      --bg-input: #111827;
+      --border: #1e3a5f; 
+      --text: #e2e8f0; 
+      --text-muted: #64748b;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --danger: #ef4444;
+      --highlight-bg: #422006;
+      --stacktrace-bg: #1c1917;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: var(--bg-dark); color: var(--text); font-size: 14px; }
+    
+    /* Header */
+    header { background: linear-gradient(180deg, #0f1729 0%, #0d1525 100%); border-bottom: 1px solid var(--border); padding: 12px 20px; position: sticky; top: 0; z-index: 100; }
+    .header-top { display: flex; align-items: center; gap: 16px; margin-bottom: 12px; }
+    .logo { font-size: 18px; font-weight: 700; background: linear-gradient(135deg, #3b82f6, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; }
+    .status-badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 12px; font-weight: 500; }
+    .status-badge.connected { background: rgba(34, 197, 94, 0.15); color: var(--success); border: 1px solid rgba(34, 197, 94, 0.3); }
+    .status-badge.disconnected { background: rgba(239, 68, 68, 0.15); color: var(--danger); border: 1px solid rgba(239, 68, 68, 0.3); }
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; animation: pulse 2s infinite; }
+    .status-badge.connected .status-dot { background: var(--success); }
+    .status-badge.disconnected .status-dot { background: var(--danger); }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+    
+    /* Toolbar */
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .toolbar-group { display: flex; gap: 6px; align-items: center; padding: 4px 8px; background: var(--bg-input); border-radius: 8px; border: 1px solid var(--border); }
+    .toolbar-group label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; }
+    input, select { background: var(--bg-dark); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 6px 10px; font-size: 13px; outline: none; transition: border-color 0.2s; }
+    input:focus, select:focus { border-color: var(--accent); }
+    input::placeholder { color: var(--text-muted); }
+    input.error { border-color: var(--danger); }
+    .input-wide { min-width: 180px; }
+    
+    /* Buttons */
+    button { background: var(--accent); color: white; border: none; border-radius: 6px; padding: 6px 14px; font-size: 13px; font-weight: 500; cursor: pointer; transition: all 0.2s; display: inline-flex; align-items: center; gap: 6px; }
+    button:hover { background: var(--accent-hover); transform: translateY(-1px); }
+    button:active { transform: translateY(0); }
+    button:disabled { opacity: 0.5; cursor: not-allowed; transform: none; }
+    button.danger { background: var(--danger); }
+    button.danger:hover { background: #dc2626; }
+    button.success { background: var(--success); }
+    button.success:hover { background: #16a34a; }
+    button.outline { background: transparent; border: 1px solid var(--border); color: var(--text); }
+    button.outline:hover { background: var(--bg-input); border-color: var(--accent); }
+    button.sm { padding: 4px 8px; font-size: 11px; }
+    
+    /* Main Layout */
+    main { display: grid; grid-template-columns: 1fr 360px; gap: 16px; padding: 16px 20px; min-height: calc(100vh - 140px); }
+    @media (max-width: 1200px) { main { grid-template-columns: 1fr; } }
+    
+    /* Panels */
+    .panel { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; display: flex; flex-direction: column; }
+    .panel-header { padding: 10px 14px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; gap: 10px; background: linear-gradient(180deg, rgba(255,255,255,0.02) 0%, transparent 100%); }
+    .panel-title { font-weight: 600; font-size: 14px; display: flex; align-items: center; gap: 8px; }
+    .panel-title .icon { font-size: 16px; }
+    .panel-actions { display: flex; gap: 6px; align-items: center; }
+    .panel-body { flex: 1; overflow-y: auto; padding: 8px; font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Consolas, monospace; font-size: 12px; line-height: 1.5; }
+    .panel-body::-webkit-scrollbar { width: 8px; }
+    .panel-body::-webkit-scrollbar-track { background: var(--bg-dark); }
+    .panel-body::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+    
+    /* Serial Grid */
+    .serial-grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(400px, 1fr)); }
+    .port-panel { min-height: 300px; max-height: 500px; }
+    .port-panel .panel-body { max-height: 400px; }
+    
+    /* Log Lines */
+    .log-line { padding: 2px 8px; border-radius: 4px; margin-bottom: 1px; white-space: pre-wrap; word-break: break-all; display: flex; gap: 8px; }
+    .log-line:hover { background: rgba(255,255,255,0.03); }
+    .log-time { color: var(--text-muted); min-width: 75px; flex-shrink: 0; }
+    .log-content { flex: 1; }
+    .log-line.stderr { color: var(--danger); }
+    .log-line.highlight { background: var(--highlight-bg); border-left: 3px solid var(--warning); }
+    .log-line.stacktrace { background: var(--stacktrace-bg); color: #fca5a5; border-left: 3px solid var(--danger); }
+    .log-line.reboot { background: rgba(139, 92, 246, 0.15); border-left: 3px solid #8b5cf6; color: #c4b5fd; }
+    .highlight-match { background: var(--warning); color: #000; padding: 0 2px; border-radius: 2px; }
+    
+    /* Sidebar Panels */
+    .sidebar { display: flex; flex-direction: column; gap: 12px; }
+    .sidebar .panel { flex-shrink: 0; }
+    .alert-panel .panel-body { max-height: 200px; }
+    .stacktrace-panel .panel-body { max-height: 180px; }
+    
+    /* Port Control */
+    .port-control { display: flex; flex-wrap: wrap; gap: 8px; padding: 10px 14px; background: var(--bg-input); border-bottom: 1px solid var(--border); }
+    .port-item { display: flex; align-items: center; gap: 6px; padding: 4px 10px; background: var(--bg-dark); border: 1px solid var(--border); border-radius: 6px; font-size: 12px; }
+    .port-item.active { border-color: var(--success); background: rgba(34, 197, 94, 0.1); }
+    .port-item .port-name { font-weight: 500; }
+    .port-item .baud { color: var(--text-muted); }
+    
+    /* Stats */
+    .stats { display: flex; gap: 16px; font-size: 12px; color: var(--text-muted); }
+    .stat { display: flex; align-items: center; gap: 4px; }
+    .stat-value { color: var(--text); font-weight: 600; }
+    
+    /* Badge/Pill */
+    .badge { padding: 2px 8px; border-radius: 12px; font-size: 11px; font-weight: 600; }
+    .badge.info { background: rgba(59, 130, 246, 0.2); color: var(--accent); }
+    .badge.success { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .badge.warning { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+    .badge.danger { background: rgba(239, 68, 68, 0.2); color: var(--danger); }
+    
+    /* Control Panel */
+    .control-panel { padding: 14px; }
+    .control-section { margin-bottom: 16px; }
+    .control-section:last-child { margin-bottom: 0; }
+    .control-label { font-size: 11px; color: var(--text-muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px; display: block; }
+    .control-row { display: flex; gap: 8px; margin-bottom: 8px; }
+    .control-row:last-child { margin-bottom: 0; }
+    
+    /* Port List */
+    .port-list { max-height: 150px; overflow-y: auto; }
+    .port-list-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px; margin-bottom: 4px; background: var(--bg-dark); border: 1px solid var(--border); }
+    .port-list-item:hover { border-color: var(--accent); }
+    .port-list-item.monitoring { border-color: var(--success); background: rgba(34, 197, 94, 0.05); }
+    .port-info { display: flex; flex-direction: column; gap: 2px; }
+    .port-name { font-weight: 500; font-size: 13px; }
+    .port-detail { font-size: 11px; color: var(--text-muted); }
+    
+    /* Empty State */
+    .empty-state { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; color: var(--text-muted); text-align: center; }
+    .empty-state .icon { font-size: 48px; margin-bottom: 16px; opacity: 0.5; }
+    .empty-state p { margin: 0 0 16px 0; }
+    
+    /* Toast notifications */
+    @keyframes slideIn {
+      from { transform: translateX(100%); opacity: 0; }
+      to { transform: translateX(0); opacity: 1; }
+    }
+    .toast { box-shadow: 0 4px 12px rgba(0,0,0,0.3); transition: opacity 0.3s; }
+    
+    /* Status indicators */
+    .status-indicator { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 20px; font-size: 12px; }
+    .status-indicator.monitoring { background: rgba(34, 197, 94, 0.15); color: var(--success); }
+    .status-indicator.stopped { background: rgba(100, 116, 139, 0.15); color: var(--text-muted); }
+    
+    /* Pulse animation for active indicators */
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.4); }
+      50% { box-shadow: 0 0 0 6px rgba(34, 197, 94, 0); }
+    }
+    .pulse { animation: pulse-green 2s infinite; }
+    
+    /* Help icon and tooltip */
+    .help-icon { 
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 50%; 
+      background: var(--border); color: var(--text-muted); 
+      font-size: 11px; font-weight: bold; cursor: help;
+      margin-left: 4px; transition: all 0.2s;
+    }
+    .help-icon:hover { background: var(--accent); color: white; }
+    
+    /* Custom tooltip */
+    [data-tooltip] { position: relative; }
+    [data-tooltip]:hover::after {
+      content: attr(data-tooltip);
+      position: absolute; bottom: 100%; left: 50%; transform: translateX(-50%);
+      background: #1e293b; color: #e2e8f0; padding: 8px 12px; border-radius: 6px;
+      font-size: 12px; white-space: nowrap; z-index: 1000;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.3); margin-bottom: 8px;
+      animation: tooltipFade 0.2s ease;
+    }
+    [data-tooltip]:hover::before {
+      content: ''; position: absolute; bottom: 100%; left: 50%;
+      transform: translateX(-50%); border: 6px solid transparent;
+      border-top-color: #1e293b; margin-bottom: -4px; z-index: 1001;
+    }
+    @keyframes tooltipFade { from { opacity: 0; transform: translateX(-50%) translateY(4px); } to { opacity: 1; transform: translateX(-50%) translateY(0); } }
+    
+    /* Modal */
+    .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); display: flex; align-items: center; justify-content: center; z-index: 2000; }
+    .modal { background: var(--bg-panel); border: 1px solid var(--border); border-radius: 12px; max-width: 600px; width: 90%; max-height: 80vh; overflow-y: auto; }
+    .modal-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
+    .modal-title { font-size: 18px; font-weight: 600; }
+    .modal-close { background: none; border: none; color: var(--text-muted); font-size: 24px; cursor: pointer; padding: 0; line-height: 1; }
+    .modal-close:hover { color: var(--text); }
+    .modal-body { padding: 20px; font-size: 14px; line-height: 1.6; }
+    .modal-body h3 { margin: 16px 0 8px; color: var(--accent); font-size: 15px; }
+    .modal-body p { margin: 0 0 12px; color: var(--text-muted); }
+    .modal-body code { background: var(--bg-dark); padding: 2px 6px; border-radius: 4px; font-size: 12px; }
+    .modal-body ul { margin: 0 0 12px; padding-left: 20px; }
+    .modal-body li { margin-bottom: 4px; color: var(--text-muted); }
   </style>
 </head>
 <body>
   <header>
+    <div class="header-top">
+      <div class="logo">⚡ ESP32 Serial Console</div>
+      <div class="status-badge disconnected" id="statusBadge">
+        <span class="status-dot"></span>
+        <span id="statusText">Connecting...</span>
+      </div>
+      <div class="stats">
+        <div class="stat">Lines: <span class="stat-value" id="totalLines">0</span></div>
+        <div class="stat">Alerts: <span class="stat-value" id="totalAlerts">0</span></div>
+        <div class="stat">Crashes: <span class="stat-value" id="totalCrashes">0</span></div>
+      </div>
+    </div>
     <div class="toolbar">
-      <span>ESP32 Serial Console (SSE)</span>
-      <input id="textFilter" placeholder="global text filter (regex optional)" />
-      <input id="alertFilter" placeholder="alert filter (regex)" />
-      <button id="clearBtn">Clear all</button>
-      <button id="stopBtn">Stop stream</button>
-      <button id="startBtn">Start stream</button>
-      <span class="muted" id="status">connecting...</span>
+      <div class="toolbar-group">
+        <label>Filter <span class="help-icon" onclick="showHelp('filter')">?</span></label>
+        <input type="text" id="textFilter" class="input-wide" placeholder="Filter logs (regex)" title="正規表現でログをフィルタリング。例: WiFi|HTTP" />
+      </div>
+      <div class="toolbar-group">
+        <label>Highlight <span class="help-icon" onclick="showHelp('highlight')">?</span></label>
+        <input type="text" id="highlightFilter" class="input-wide" placeholder="Highlight text (regex)" title="マッチしたテキストを黄色でハイライト表示" />
+      </div>
+      <div class="toolbar-group">
+        <label>Alert on <span class="help-icon" onclick="showHelp('alert')">?</span></label>
+        <input type="text" id="alertFilter" class="input-wide" placeholder="Alert pattern (regex)" title="マッチしたログをAlertsパネルにも表示" />
+      </div>
+      <button class="outline" id="clearAllBtn" title="全ポートのログをクリア">🗑 Clear All</button>
+      <button class="outline" id="exportBtn" title="ログをテキストファイルでダウンロード">📥 Export</button>
+      <button class="danger" id="stopStreamBtn" title="SSEストリームを停止（モニターは継続）">⏹ Stop</button>
+      <button class="success" id="startStreamBtn" title="SSEストリームを再開">▶ Start</button>
+      <button class="outline" id="helpBtn" title="ヘルプを表示" onclick="showHelp('main')">❓ Help</button>
     </div>
   </header>
+
   <main>
-    <div class="muted" id="portsInfo"></div>
-    <div class="grid" id="panelGrid"></div>
-    <div class="panel" style="margin-top:12px;">
+    <div class="serial-area">
+      <div class="panel" style="margin-bottom: 12px;">
       <div class="panel-header">
-        <div class="panel-title">Alerts</div>
-        <div class="pill" id="alertCount">0</div>
-        <button id="clearAlerts">Clear</button>
+          <div class="panel-title">🔌 Active Ports</div>
+          <button class="sm outline" id="refreshPortsBtn">↻ Refresh</button>
       </div>
-      <div class="panel-body" id="alertsBody" style="max-height:200px;"></div>
+        <div class="port-control" id="portControl">
+          <div class="empty-state" style="padding: 20px; width: 100%;">
+            <p>No active monitors. Start monitoring from the control panel →</p>
+          </div>
+        </div>
+      </div>
+      <div class="serial-grid" id="serialGrid">
+        <!-- Port panels will be added dynamically -->
+      </div>
+    </div>
+
+    <div class="sidebar">
+      <!-- Monitor Control Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">🎛 Monitor Control</div>
+        </div>
+        <div class="control-panel">
+          <div class="control-section">
+            <span class="control-label">Available Ports <span class="help-icon" onclick="showHelp('ports')">?</span></span>
+            <div class="port-list" id="availablePorts">
+              <div class="empty-state" style="padding: 20px;">
+                <p>Click refresh to scan ports</p>
+              </div>
+            </div>
+            <div class="control-row" style="margin-top: 8px;">
+              <button class="outline" style="flex:1" id="scanPortsBtn" title="USBシリアルポートをスキャンして一覧表示">🔍 Scan Ports</button>
+            </div>
+          </div>
+          <div class="control-section">
+            <span class="control-label">Quick Start <span class="help-icon" onclick="showHelp('quickstart')">?</span></span>
+            <div class="control-row">
+              <select id="baudSelect" style="flex:1" title="シリアル通信のボーレート（ESP32は通常115200）">
+                <option value="115200" selected>115200</option>
+                <option value="74880">74880</option>
+                <option value="57600">57600</option>
+                <option value="38400">38400</option>
+                <option value="19200">19200</option>
+                <option value="9600">9600</option>
+              </select>
+              <label style="display:flex; align-items:center; gap:4px; font-size:12px;" title="ESP32起動時のボーレート自動検出（74880→115200）">
+                <input type="checkbox" id="autoBaudCheck" checked /> Auto
+              </label>
+            </div>
+            <div class="control-row">
+              <button class="success" style="flex:1" id="startAllBtn" title="ESP32ポート（cu.SLAB_USBtoUART, cu.usbserial等）を一括で監視開始">▶ Start All ESP32</button>
+            </div>
+            <div class="control-row">
+              <button class="danger" style="flex:1" id="stopAllBtn" title="すべてのシリアル監視を停止">⏹ Stop All</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Alerts Panel -->
+      <div class="panel alert-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            🔔 Alerts
+            <span class="badge warning" id="alertBadge">0</span>
+          </div>
+          <button class="sm outline" id="clearAlertsBtn">Clear</button>
+        </div>
+        <div class="panel-body" id="alertsBody">
+          <div class="empty-state" style="padding: 20px;">
+            <p>No alerts yet</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Stack Traces Panel -->
+      <div class="panel stacktrace-panel">
+        <div class="panel-header">
+          <div class="panel-title">
+            💥 Crashes / Reboots
+            <span class="badge danger" id="crashBadge">0</span>
+          </div>
+          <button class="sm outline" id="clearCrashesBtn">Clear</button>
+        </div>
+        <div class="panel-body" id="crashesBody">
+          <div class="empty-state" style="padding: 20px;">
+            <p>No crashes detected</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Device Info Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📱 Device Info <span class="help-icon" onclick="showHelp('deviceinfo')">?</span></div>
+          <button class="sm outline" id="refreshDeviceInfoBtn" title="esptool.pyでチップ情報を再取得">↻ Refresh</button>
+        </div>
+        <div class="control-panel" id="deviceInfoPanel">
+          <div class="empty-state" style="padding: 20px;">
+            <p>Select a port to view device info</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Firmware Upload Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📦 Firmware Upload <span class="help-icon" onclick="showHelp('firmware')">?</span></div>
+        </div>
+        <div class="control-panel">
+          <div class="control-section">
+            <span class="control-label">Build Artifacts</span>
+            <select id="artifactSelect" style="width:100%; margin-bottom:8px;" title="ビルド済みバイナリ(.bin)を選択">
+              <option value="">-- Select firmware --</option>
+            </select>
+            <div class="control-row">
+              <button class="outline" style="flex:1" id="scanArtifactsBtn" title="ビルドディレクトリからファームウェアを検索">🔍 Scan Builds</button>
+            </div>
+          </div>
+          <div class="control-section">
+            <span class="control-label">Upload Options</span>
+            <div class="control-row">
+              <label style="display:flex; align-items:center; gap:4px; font-size:12px;" title="アップロード前にFlashメモリを完全消去（工場出荷時状態に）">
+                <input type="checkbox" id="eraseBeforeFlash" /> Erase before flash
+              </label>
+            </div>
+            <div class="control-row">
+              <button class="success" style="flex:1" id="uploadFirmwareBtn" title="Available Portsで選択中のポートにアップロード">⬆ Upload to Selected</button>
+            </div>
+            <div class="control-row">
+              <button class="success" style="flex:1" id="uploadAllBtn" title="接続中のすべてのESP32に同じファームウェアを一括アップロード">⬆ Upload to All ESP32</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Arduino CLI Settings Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">⚙ Settings <span class="help-icon" onclick="showHelp('settings')">?</span></div>
+        </div>
+        <div class="control-panel">
+          <div class="control-section">
+            <span class="control-label">FQBN (Board)</span>
+            <select id="fqbnSelect" style="width:100%;" title="Fully Qualified Board Name：ボードの種類を指定">
+              <option value="esp32:esp32:esp32" selected>ESP32 Dev Module</option>
+              <option value="esp32:esp32:esp32wrover">ESP32 Wrover Module</option>
+              <option value="esp32:esp32:esp32s2">ESP32-S2</option>
+              <option value="esp32:esp32:esp32s3">ESP32-S3</option>
+              <option value="esp32:esp32:esp32c3">ESP32-C3</option>
+            </select>
+          </div>
+          <div class="control-section">
+            <span class="control-label">Partition Scheme</span>
+            <select id="partitionSelect" style="width:100%;" title="Flashメモリのパーティション配分を指定">
+              <option value="default" selected>Default 4MB</option>
+              <option value="huge_app">Huge APP (3MB)</option>
+              <option value="min_spiffs">Minimal SPIFFS</option>
+              <option value="no_ota">No OTA</option>
+            </select>
+          </div>
+          <div class="control-section">
+            <span class="control-label">Flash Mode</span>
+            <select id="flashModeSelect" style="width:100%;" title="Flashアクセスモード（通常QIO、互換性問題時DIO）">
+              <option value="qio" selected>QIO</option>
+              <option value="dio">DIO</option>
+              <option value="qout">QOUT</option>
+              <option value="dout">DOUT</option>
+            </select>
+          </div>
+        </div>
+      </div>
     </div>
   </main>
-  <script>
-    const panelGrid = document.getElementById('panelGrid');
-    const portsInfo = document.getElementById('portsInfo');
-    const textFilter = document.getElementById('textFilter');
-    const statusEl = document.getElementById('status');
-    const alertFilter = document.getElementById('alertFilter');
-    const clearBtn = document.getElementById('clearBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const startBtn = document.getElementById('startBtn');
-    const clearAlerts = document.getElementById('clearAlerts');
-    const alertsBody = document.getElementById('alertsBody');
-    const alertCount = document.getElementById('alertCount');
-    let regex = null;
-    let alertRegex = null;
-    let es = null;
-    textFilter.addEventListener('input', () => {
-      const val = textFilter.value.trim();
-      try { regex = val ? new RegExp(val, 'i') : null; textFilter.style.borderColor = '#1f2c45'; }
-      catch { regex = null; textFilter.style.borderColor = '#f87171'; }
-    });
-    alertFilter.addEventListener('input', () => {
-      const val = alertFilter.value.trim();
-      try { alertRegex = val ? new RegExp(val, 'i') : null; alertFilter.style.borderColor = '#1f2c45'; }
-      catch { alertRegex = null; alertFilter.style.borderColor = '#f87171'; }
-    });
-    clearBtn.addEventListener('click', () => { portPanels.clearAll(); });
-    clearAlerts.addEventListener('click', () => { alertsBody.innerHTML=''; alertCount.textContent='0'; });
-    stopBtn.addEventListener('click', () => disconnect());
-    startBtn.addEventListener('click', () => reconnect());
 
-    class PortPanels {
-      constructor() {
-        this.panels = new Map(); // port -> {container, body, buffer}
+  <script>
+    // State
+    let es = null;
+    let textRegex = null;
+    let highlightRegex = null;
+    let alertRegex = null;
+    let totalLines = 0;
+    let totalAlerts = 0;
+    let totalCrashes = 0;
+    const portPanels = new Map();
+    const monitoringPorts = new Set();
+    const allLogs = [];
+    const MAX_LOGS = 1000;
+    
+    // Crash/Reboot patterns
+    const CRASH_PATTERNS = [
+      /Guru Meditation Error/i,
+      /Backtrace:/i,
+      /rst:0x[0-9a-f]+/i,
+      /Brownout detector/i,
+      /CPU halted/i,
+      /assert failed/i,
+      /panic/i,
+      /LoadProhibited/i,
+      /StoreProhibited/i,
+      /InstrFetchProhibited/i,
+      /IllegalInstruction/i,
+    ];
+    
+    // DOM elements
+    const statusBadge = document.getElementById('statusBadge');
+    const statusText = document.getElementById('statusText');
+    const totalLinesEl = document.getElementById('totalLines');
+    const totalAlertsEl = document.getElementById('totalAlerts');
+    const totalCrashesEl = document.getElementById('totalCrashes');
+    const textFilterEl = document.getElementById('textFilter');
+    const highlightFilterEl = document.getElementById('highlightFilter');
+    const alertFilterEl = document.getElementById('alertFilter');
+    const serialGrid = document.getElementById('serialGrid');
+    const portControl = document.getElementById('portControl');
+    const alertsBody = document.getElementById('alertsBody');
+    const crashesBody = document.getElementById('crashesBody');
+    const alertBadge = document.getElementById('alertBadge');
+    const crashBadge = document.getElementById('crashBadge');
+    const availablePorts = document.getElementById('availablePorts');
+    const baudSelect = document.getElementById('baudSelect');
+    const autoBaudCheck = document.getElementById('autoBaudCheck');
+    
+    // Filter handlers
+    textFilterEl.addEventListener('input', () => {
+      const val = textFilterEl.value.trim();
+      try { 
+        textRegex = val ? new RegExp(val, 'i') : null; 
+        textFilterEl.classList.remove('error');
+      } catch { 
+        textRegex = null; 
+        textFilterEl.classList.add('error');
       }
-      ensure(port) {
-        if (this.panels.has(port)) return this.panels.get(port);
-        const wrapper = document.createElement('div');
-        wrapper.className = 'panel';
-        const header = document.createElement('div');
-        header.className = 'panel-header';
-        const title = document.createElement('div');
-        title.className = 'panel-title';
-        title.textContent = port;
-        const clearBtn = document.createElement('button');
-        clearBtn.textContent = 'Clear';
-        clearBtn.onclick = () => body.innerHTML = '';
-        header.appendChild(title);
-        header.appendChild(clearBtn);
-        const body = document.createElement('div');
-        body.className = 'panel-body';
-        wrapper.appendChild(header);
-        wrapper.appendChild(body);
-        panelGrid.appendChild(wrapper);
-        const panel = { container: wrapper, body, buffer: [] };
-        this.panels.set(port, panel);
-        this.updatePortsInfo();
-        return panel;
+    });
+    
+    highlightFilterEl.addEventListener('input', () => {
+      const val = highlightFilterEl.value.trim();
+      try { 
+        highlightRegex = val ? new RegExp(val, 'gi') : null; 
+        highlightFilterEl.classList.remove('error');
+      } catch { 
+        highlightRegex = null; 
+        highlightFilterEl.classList.add('error');
       }
-      updatePortsInfo() {
-        const ports = Array.from(this.panels.keys());
-        portsInfo.textContent = ports.length ? 'Ports: ' + ports.join(', ') : 'Ports: none';
+    });
+    
+    alertFilterEl.addEventListener('input', () => {
+      const val = alertFilterEl.value.trim();
+      try { 
+        alertRegex = val ? new RegExp(val, 'i') : null; 
+        alertFilterEl.classList.remove('error');
+      } catch { 
+        alertRegex = null; 
+        alertFilterEl.classList.add('error');
       }
-      append(evt) {
+    });
+    
+    // Button handlers
+    document.getElementById('clearAllBtn').onclick = () => clearAllLogs();
+    document.getElementById('exportBtn').onclick = () => exportLogs();
+    document.getElementById('stopStreamBtn').onclick = () => disconnect();
+    document.getElementById('startStreamBtn').onclick = () => connect();
+    document.getElementById('clearAlertsBtn').onclick = () => { alertsBody.innerHTML = ''; totalAlerts = 0; updateStats(); };
+    document.getElementById('clearCrashesBtn').onclick = () => { crashesBody.innerHTML = ''; totalCrashes = 0; updateStats(); };
+    document.getElementById('scanPortsBtn').onclick = () => scanPorts();
+    document.getElementById('refreshPortsBtn').onclick = () => scanPorts();
+    document.getElementById('startAllBtn').onclick = () => startAllMonitors();
+    document.getElementById('stopAllBtn').onclick = () => stopAllMonitors();
+    
+    function updateStats() {
+      totalLinesEl.textContent = totalLines;
+      totalAlertsEl.textContent = totalAlerts;
+      totalCrashesEl.textContent = totalCrashes;
+      alertBadge.textContent = totalAlerts;
+      crashBadge.textContent = totalCrashes;
+    }
+    
+    function setStatus(connected, text) {
+      statusBadge.className = 'status-badge ' + (connected ? 'connected' : 'disconnected');
+      statusText.textContent = text;
+    }
+    
+    function formatTime(date) {
+      return date.toLocaleTimeString('ja-JP', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit', fractionalSecondDigits: 3 });
+    }
+    
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+    
+    // Help modal system
+    const helpContent = {
+      main: {
+        title: 'ESP32 Serial Console ヘルプ',
+        body: \`
+          <h3>🎯 概要</h3>
+          <p>複数のESP32を同時に監視できるシリアルコンソールです。MCPと連携してAI駆動の開発をサポートします。</p>
+          
+          <h3>📟 基本操作</h3>
+          <ul>
+            <li><strong>Scan Ports</strong> - USBポートをスキャンしてESP32を検出</li>
+            <li><strong>Start/Stop</strong> - 各ポートの監視を開始/停止</li>
+            <li><strong>Start All ESP32</strong> - cu.SLAB_USBtoUART等のESP32ポートを一括開始</li>
+          </ul>
+          
+          <h3>🔍 フィルタ機能</h3>
+          <ul>
+            <li><strong>Filter</strong> - 正規表現でログを絞り込み表示</li>
+            <li><strong>Highlight</strong> - マッチするテキストを黄色で強調</li>
+            <li><strong>Alert on</strong> - マッチしたログをAlertsパネルにも表示</li>
+          </ul>
+          
+          <h3>🚨 自動検出</h3>
+          <p>クラッシュ（Guru Meditation等）やリブートは自動で検出され、専用パネルに記録されます。</p>
+        \`
+      },
+      filter: {
+        title: 'Filter（フィルタ）',
+        body: \`
+          <h3>使い方</h3>
+          <p>正規表現を入力すると、マッチするログ行のみ表示されます。</p>
+          
+          <h3>例</h3>
+          <ul>
+            <li><code>WiFi</code> - WiFiを含む行のみ表示</li>
+            <li><code>error|fail</code> - errorまたはfailを含む行</li>
+            <li><code>^\\[E\\]</code> - [E]で始まる行（ESPログレベル）</li>
+            <li><code>HTTP.*200</code> - HTTPと200が同じ行にある</li>
+          </ul>
+          
+          <h3>ヒント</h3>
+          <p>大文字小文字は区別しません。空にするとすべて表示されます。</p>
+        \`
+      },
+      highlight: {
+        title: 'Highlight（ハイライト）',
+        body: \`
+          <h3>使い方</h3>
+          <p>正規表現を入力すると、マッチするテキストが黄色で強調表示されます。</p>
+          
+          <h3>例</h3>
+          <ul>
+            <li><code>MAC|IP</code> - MACとIPを強調</li>
+            <li><code>192\\.168\\.[0-9.]+</code> - IPアドレスを強調</li>
+            <li><code>connected|disconnected</code> - 接続状態を強調</li>
+          </ul>
+          
+          <h3>ヒント</h3>
+          <p>Filterと併用可能。フィルタされた行の中でさらに強調できます。</p>
+        \`
+      },
+      alert: {
+        title: 'Alert on（アラート）',
+        body: \`
+          <h3>使い方</h3>
+          <p>正規表現を入力すると、マッチしたログ行がAlertsパネルにも表示されます。</p>
+          
+          <h3>活用例</h3>
+          <ul>
+            <li><code>PASS|OK|SUCCESS</code> - テスト合格を検出</li>
+            <li><code>error|fail|exception</code> - エラーを検出</li>
+            <li><code>boot completed</code> - 起動完了を検出</li>
+          </ul>
+          
+          <h3>量産テスト向け</h3>
+          <p>10台のESP32を接続し、特定のシリアル出力でPass/Failを判定する使い方に最適です。</p>
+        \`
+      },
+      quickstart: {
+        title: 'Quick Start（クイックスタート）',
+        body: \`
+          <h3>ボーレート</h3>
+          <p>ESP32は通常<code>115200</code>です。起動直後は<code>74880</code>でブートログが出ます。</p>
+          
+          <h3>Auto（自動ボーレート）</h3>
+          <p>ONにすると、74880のブートメッセージ後に自動で115200に切り替わります。</p>
+          
+          <h3>Start All ESP32</h3>
+          <p>以下のパターンにマッチするポートを自動で開始します：</p>
+          <ul>
+            <li><code>cu.SLAB_USBtoUART</code> - CP2102/CP2104チップ</li>
+            <li><code>cu.usbserial</code> - CH340/CH341チップ</li>
+            <li><code>cu.wchusbserial</code> - WCH系チップ</li>
+          </ul>
+        \`
+      },
+      ports: {
+        title: 'Available Ports（利用可能なポート）',
+        body: \`
+          <h3>ポート一覧</h3>
+          <p>Scan Portsをクリックすると、接続されているUSBシリアルポートが表示されます。</p>
+          
+          <h3>色の意味</h3>
+          <ul>
+            <li><span style="color:#22c55e">●緑</span> - 監視中</li>
+            <li><span style="color:#6b7280">●灰</span> - 未監視</li>
+          </ul>
+          
+          <h3>操作</h3>
+          <p>各ポートの横にあるボタンで個別に開始/停止できます。</p>
+          
+          <h3>ESP32が見つからない？</h3>
+          <ul>
+            <li>USBケーブルがデータ対応か確認</li>
+            <li>CP2102/CH340ドライバがインストールされているか確認</li>
+            <li>macOS: システム環境設定→セキュリティで許可が必要な場合あり</li>
+          </ul>
+        \`
+      },
+      firmware: {
+        title: 'Firmware Upload（ファームウェアアップロード）',
+        body: \`
+          <h3>概要</h3>
+          <p>ビルド済みのファームウェア(.bin)を複数のESP32に一括アップロードできます。</p>
+          
+          <h3>操作手順</h3>
+          <ol>
+            <li><strong>Scan Builds</strong> - ビルドディレクトリをスキャン</li>
+            <li>ドロップダウンからファームウェアを選択</li>
+            <li><strong>Upload to Selected</strong> または <strong>Upload to All ESP32</strong></li>
+          </ol>
+          
+          <h3>オプション</h3>
+          <ul>
+            <li><strong>Erase before flash</strong> - Flash全消去後にアップロード（設定リセット時に使用）</li>
+          </ul>
+          
+          <h3>注意</h3>
+          <p>アップロード中はシリアル監視を一時停止します。完了後に自動で再開されます。</p>
+        \`
+      },
+      settings: {
+        title: 'Settings（設定）',
+        body: \`
+          <h3>FQBN（ボード指定）</h3>
+          <p>Fully Qualified Board Name。お使いのESP32の種類を選択してください。</p>
+          <ul>
+            <li><strong>ESP32 Dev Module</strong> - 一般的なDevKit</li>
+            <li><strong>ESP32-S2/S3/C3</strong> - 新しいバリエーション</li>
+          </ul>
+          
+          <h3>Partition Scheme</h3>
+          <p>Flashメモリの分割方法。大きなプログラムはHuge APPを選択。</p>
+          
+          <h3>Flash Mode</h3>
+          <ul>
+            <li><strong>QIO</strong> - 最速（ほとんどのモジュール）</li>
+            <li><strong>DIO</strong> - 互換性モード（書き込みに問題がある場合）</li>
+          </ul>
+        \`
+      },
+      deviceinfo: {
+        title: 'Device Info（デバイス情報）',
+        body: \`
+          <h3>表示内容</h3>
+          <ul>
+            <li><strong>Chip</strong> - ESP32のチップタイプ</li>
+            <li><strong>Flash</strong> - Flashメモリサイズ</li>
+            <li><strong>MAC Address</strong> - Wi-Fi/BT MACアドレス</li>
+          </ul>
+          
+          <h3>MAC取得方法</h3>
+          <p>esptool.pyを使用してチップから直接読み取ります。ファームウェアは不要です。</p>
+          
+          <h3>Refreshボタン</h3>
+          <p>シリアルモニター停止後にデバイス情報を再取得できます。</p>
+        \`
+      }
+    };
+    
+    function showHelp(topic) {
+      const content = helpContent[topic] || helpContent.main;
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+      overlay.innerHTML = \`
+        <div class="modal">
+          <div class="modal-header">
+            <span class="modal-title">\${content.title}</span>
+            <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+          </div>
+          <div class="modal-body">\${content.body}</div>
+        </div>
+      \`;
+      document.body.appendChild(overlay);
+    }
+    window.showHelp = showHelp;
+    
+    function applyHighlight(text) {
+      if (!highlightRegex) return escapeHtml(text);
+      return escapeHtml(text).replace(highlightRegex, match => '<span class="highlight-match">' + match + '</span>');
+    }
+    
+    function isCrashLine(text) {
+      return CRASH_PATTERNS.some(p => p.test(text));
+    }
+    
+    function ensurePortPanel(port) {
+      if (portPanels.has(port)) return portPanels.get(port);
+      
+      // Add to monitoring set when panel is created
+      monitoringPorts.add(port);
+      
+      const panel = document.createElement('div');
+      panel.className = 'panel port-panel';
+      panel.id = 'panel-' + CSS.escape(port);
+      panel.innerHTML = \`
+        <div class="panel-header">
+          <div class="panel-title">
+            <span class="icon">📟</span>
+            <span>\${escapeHtml(port)}</span>
+            <span class="badge success pulse" id="status-\${CSS.escape(port)}">● LIVE</span>
+            <span class="badge info" id="baud-\${CSS.escape(port)}" title="現在のボーレート">--</span>
+          </div>
+          <div class="panel-actions">
+            <button class="sm outline" onclick="clearPortLogs('\${escapeHtml(port)}')" title="このポートのログをクリア">🗑</button>
+            <button class="sm outline" onclick="restartPortMonitor('\${escapeHtml(port)}')" title="モニターを再起動（ポートを閉じて再接続）">🔄</button>
+            <button class="sm danger" onclick="stopPortMonitor('\${escapeHtml(port)}')" title="このポートの監視を停止">⏹ Stop</button>
+          </div>
+        </div>
+        <div class="panel-body" id="logs-\${CSS.escape(port)}"></div>
+      \`;
+      serialGrid.appendChild(panel);
+      
+      const body = panel.querySelector('.panel-body');
+      portPanels.set(port, { panel, body, lineCount: 0 });
+      updatePortControl();
+      return portPanels.get(port);
+    }
+    
+    function updatePortControl() {
+      const ports = Array.from(portPanels.keys());
+      if (ports.length === 0) {
+        portControl.innerHTML = '<div class="empty-state" style="padding: 20px; width: 100%;"><p>No active monitors. Click "Scan Ports" and start a monitor.</p></div>';
+        return;
+      }
+      portControl.innerHTML = ports.map(port => \`
+        <div class="port-item active" style="cursor:pointer" onclick="document.getElementById('panel-' + CSS.escape('\${escapeHtml(port)}')).scrollIntoView({behavior:'smooth'})">
+          <span style="color:#22c55e;font-size:10px;">●</span>
+          <span class="port-name">\${escapeHtml(port)}</span>
+          <span class="baud" id="ctrl-baud-\${CSS.escape(port)}" style="background:#22c55e22;padding:2px 6px;border-radius:4px;"></span>
+          <button class="sm outline" onclick="event.stopPropagation();restartPortMonitor('\${escapeHtml(port)}')" title="Restart" style="padding:2px 6px;">🔄</button>
+        </div>
+      \`).join('');
+    }
+    
+    function appendLog(evt) {
         const port = evt.port || 'unknown';
-        const panel = this.ensure(port);
-        const text = this.formatText(evt);
-        if (regex && !regex.test(text)) return;
+      const portData = ensurePortPanel(port);
+      const text = evt.line ?? '';
+      const isCrash = isCrashLine(text);
+      const isReboot = /rst:0x|ets [A-Z][a-z]+ \\d+ \\d{4}/i.test(text);
+      
+      // Update baud display
+      if (evt.baud) {
+        const baudEl = document.getElementById('baud-' + CSS.escape(port));
+        const ctrlBaudEl = document.getElementById('ctrl-baud-' + CSS.escape(port));
+        if (baudEl) baudEl.textContent = evt.baud + ' baud';
+        if (ctrlBaudEl) ctrlBaudEl.textContent = evt.baud;
+      }
+      
+      // Check filter
+      if (textRegex && !textRegex.test(text)) return;
+      
+      totalLines++;
+      portData.lineCount++;
+      
+      // Create log line
         const div = document.createElement('div');
-        div.className = 'line' + (evt.stream === 'stderr' ? ' stderr' : '');
-        const eventTs = evt.timestamp ? new Date(evt.timestamp).toLocaleTimeString() : '';
-        const systemTs = new Date().toLocaleTimeString();
-        const prefix = systemTs + (eventTs ? ' [' + eventTs + ']' : '');
-        div.textContent = prefix + ' ' + text;
-        panel.body.appendChild(div);
-        while (panel.body.childElementCount > 1000) { panel.body.removeChild(panel.body.firstChild); }
-        div.scrollIntoView({ block: 'end' });
+      let className = 'log-line';
+      if (evt.stream === 'stderr') className += ' stderr';
+      if (isCrash) className += ' stacktrace';
+      else if (isReboot) className += ' reboot';
+      else if (highlightRegex && highlightRegex.test(text)) className += ' highlight';
+      div.className = className;
+      
+      const sysTime = formatTime(new Date());
+      div.innerHTML = '<span class="log-time">' + sysTime + '</span><span class="log-content">' + applyHighlight(text) + '</span>';
+      
+      portData.body.appendChild(div);
+      
+      // Limit lines
+      while (portData.body.childElementCount > MAX_LOGS) {
+        portData.body.removeChild(portData.body.firstChild);
+      }
+      
+      div.scrollIntoView({ block: 'end', behavior: 'auto' });
+      
+      // Store log
+      allLogs.push({ time: sysTime, port, text, isCrash, isReboot });
+      if (allLogs.length > MAX_LOGS * 10) allLogs.splice(0, allLogs.length - MAX_LOGS * 10);
+      
+      // Alert check
         if (alertRegex && alertRegex.test(text)) {
+        totalAlerts++;
           const alertDiv = document.createElement('div');
-          alertDiv.className = 'line';
-          alertDiv.textContent = prefix + ' ' + text;
+        alertDiv.className = 'log-line' + (isCrash ? ' stacktrace' : '');
+        alertDiv.innerHTML = '<span class="log-time">' + sysTime + '</span><span class="log-content">[' + escapeHtml(port) + '] ' + applyHighlight(text) + '</span>';
+        alertsBody.querySelector('.empty-state')?.remove();
           alertsBody.appendChild(alertDiv);
-          while (alertsBody.childElementCount > 200) { alertsBody.removeChild(alertsBody.firstChild); }
-          alertCount.textContent = String(alertsBody.childElementCount);
+        while (alertsBody.childElementCount > 200) alertsBody.removeChild(alertsBody.firstChild);
           alertDiv.scrollIntoView({ block: 'end' });
         }
+      
+      // Crash detection
+      if (isCrash || isReboot) {
+        totalCrashes++;
+        const crashDiv = document.createElement('div');
+        crashDiv.className = 'log-line' + (isCrash ? ' stacktrace' : ' reboot');
+        crashDiv.innerHTML = '<span class="log-time">' + sysTime + '</span><span class="log-content">[' + escapeHtml(port) + '] ' + escapeHtml(text) + '</span>';
+        crashesBody.querySelector('.empty-state')?.remove();
+        crashesBody.appendChild(crashDiv);
+        while (crashesBody.childElementCount > 100) crashesBody.removeChild(crashesBody.firstChild);
+        crashDiv.scrollIntoView({ block: 'end' });
       }
-      clearAll() {
-        for (const panel of this.panels.values()) {
-          panel.body.innerHTML = '';
-        }
+      
+      updateStats();
+    }
+    
+    function clearPortLogs(port) {
+      const portData = portPanels.get(port);
+      if (portData) {
+        portData.body.innerHTML = '';
+        portData.lineCount = 0;
       }
-      formatText(evt) {
-        const portLabel = '[' + (evt.port || 'unknown') + '] ';
-        if (evt.type === 'serial_end') {
-          return portLabel + '<end> reason=' + (evt.reason || 'unknown') + ' reboot=' + (evt.rebootDetected ? 'yes' : 'no') + ' lines=' + (evt.lineNumber || '');
+    }
+    
+    function clearAllLogs() {
+      for (const [port, data] of portPanels) {
+        data.body.innerHTML = '';
+        data.lineCount = 0;
+      }
+      totalLines = 0;
+      updateStats();
+    }
+    
+    function exportLogs() {
+      const text = allLogs.map(l => l.time + ' [' + l.port + '] ' + l.text).join('\\n');
+      const blob = new Blob([text], { type: 'text/plain' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'esp32-logs-' + new Date().toISOString().replace(/[:.]/g, '-') + '.txt';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+    
+    // Toast notification
+    function showToast(message, type = 'info') {
+      const toast = document.createElement('div');
+      toast.className = 'toast toast-' + type;
+      toast.textContent = message;
+      toast.style.cssText = 'position:fixed;bottom:20px;right:20px;padding:12px 20px;border-radius:8px;color:#fff;font-size:14px;z-index:9999;animation:slideIn 0.3s ease;';
+      if (type === 'success') toast.style.background = '#22c55e';
+      else if (type === 'error') toast.style.background = '#ef4444';
+      else if (type === 'warning') toast.style.background = '#f59e0b';
+      else toast.style.background = '#3b82f6';
+      document.body.appendChild(toast);
+      setTimeout(() => { toast.style.opacity = '0'; setTimeout(() => toast.remove(), 300); }, 3000);
+    }
+    
+    // Fetch active monitors from server
+    async function fetchActiveMonitors() {
+      try {
+        const resp = await fetch('/api/monitors');
+        const data = await resp.json();
+        if (data.ok && data.monitors) {
+          monitoringPorts.clear();
+          for (const m of data.monitors) {
+            if (m && m.port) monitoringPorts.add(m.port);
+          }
         }
-        if (evt.raw && evt.encoding === 'base64') {
-          return portLabel + '<raw ' + (evt.encoding || '') + '>';
+      } catch (err) {
+        console.error('Failed to fetch monitors:', err);
+      }
+    }
+    
+    async function scanPorts() {
+      const btn = document.getElementById('scanPortsBtn');
+      btn.disabled = true;
+      btn.textContent = '🔄 Scanning...';
+      
+      // First, fetch active monitors
+      await fetchActiveMonitors();
+      
+      try {
+        const resp = await fetch('/api/ports');
+        const data = await resp.json();
+        if (data.ports && data.ports.length > 0) {
+          availablePorts.innerHTML = data.ports.map(p => {
+            const isMonitoring = monitoringPorts.has(p.port);
+            return \`
+            <div class="port-list-item \${isMonitoring ? 'monitoring' : ''}">
+              <div class="port-info">
+                <div class="port-name">
+                  \${isMonitoring ? '🟢' : '⚪'} \${escapeHtml(p.port)}
+                </div>
+                <div class="port-detail">
+                  \${p.isEsp32 ? '✓ ESP32' : ''} 
+                  \${p.label || ''} 
+                  \${isMonitoring ? '<span style="color:#22c55e;">● Monitoring</span>' : ''}
+                </div>
+              </div>
+              <button class="sm \${isMonitoring ? 'danger' : 'success'}" 
+                      onclick="\${isMonitoring ? 'stopPortMonitor' : 'startPortMonitor'}('\${escapeHtml(p.port)}')"
+                      id="btn-\${CSS.escape(p.port)}">
+                \${isMonitoring ? '⏹ Stop' : '▶ Start'}
+              </button>
+            </div>
+          \`}).join('');
+          showToast('Found ' + data.ports.length + ' port(s), ' + monitoringPorts.size + ' monitoring', 'info');
+        } else {
+          // If no ports from API, try to list serial ports directly
+          availablePorts.innerHTML = '<div class="empty-state" style="padding:20px;"><p>No ports found. Connect ESP32 via USB.</p></div>';
+          showToast('No ports found', 'warning');
         }
-        return portLabel + (evt.line ?? '');
+      } catch (err) {
+        availablePorts.innerHTML = '<div class="empty-state" style="padding:20px;"><p>Failed to scan ports</p></div>';
+        showToast('Scan failed: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '🔍 Scan Ports';
+      }
+    }
+    
+    async function startPortMonitor(port) {
+      const btn = document.getElementById('btn-' + CSS.escape(port));
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Starting...'; }
+      
+      const baud = parseInt(baudSelect.value);
+      const autoBaud = autoBaudCheck.checked;
+      try {
+        const resp = await fetch('/api/monitor/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port, baud, auto_baud: autoBaud })
+        });
+        const data = await resp.json();
+        if (data.ok) {
+          monitoringPorts.add(port);
+          showToast('✓ Started monitoring ' + port + ' @ ' + (data.baud || baud) + ' baud', 'success');
+          await scanPorts();
+        } else {
+          showToast('✗ Failed to start: ' + (data.error || 'Unknown error'), 'error');
+        }
+      } catch (err) {
+        console.error('Failed to start monitor:', err);
+        showToast('✗ Start failed: ' + err.message, 'error');
+      } finally {
+        const btn = document.getElementById('btn-' + CSS.escape(port));
+        if (btn) { btn.disabled = false; }
+        await scanPorts();
+      }
+    }
+    
+    async function stopPortMonitor(port) {
+      const btn = document.getElementById('btn-' + CSS.escape(port));
+      if (btn) { btn.disabled = true; btn.textContent = '⏳ Stopping...'; }
+      
+      try {
+        const resp = await fetch('/api/monitor/stop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port })
+        });
+        const data = await resp.json();
+        monitoringPorts.delete(port);
+        if (data.ok) {
+          showToast('⏹ Stopped monitoring ' + port, 'info');
+        } else {
+          showToast('Stop completed (port may have disconnected)', 'warning');
+        }
+      } catch (err) {
+        console.error('Failed to stop monitor:', err);
+        showToast('Stop error: ' + err.message, 'error');
+      } finally {
+        await scanPorts();
+      }
+    }
+    
+    async function restartPortMonitor(port) {
+      showToast('🔄 Restarting monitor for ' + port + '...', 'info');
+      await stopPortMonitor(port);
+      await new Promise(r => setTimeout(r, 1000));
+      await startPortMonitor(port);
+    }
+    
+    async function startAllMonitors() {
+      const btn = document.getElementById('startAllBtn');
+      btn.disabled = true;
+      btn.textContent = '⏳ Starting...';
+      
+      try {
+        const resp = await fetch('/api/ports');
+        const data = await resp.json();
+        const esp32Ports = (data.ports || []).filter(p => p.isEsp32);
+        
+        if (esp32Ports.length === 0) {
+          showToast('No ESP32 devices found', 'warning');
+          return;
+        }
+        
+        showToast('Starting ' + esp32Ports.length + ' monitor(s)...', 'info');
+        
+        for (const p of esp32Ports) {
+          await startPortMonitor(p.port);
+          await new Promise(r => setTimeout(r, 500)); // Small delay between starts
+        }
+        
+        showToast('✓ All ' + esp32Ports.length + ' monitors started', 'success');
+      } catch (err) {
+        console.error('Failed to start all:', err);
+        showToast('Failed to start monitors: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '▶ Start All ESP32';
+      }
+    }
+    
+    async function stopAllMonitors() {
+      const btn = document.getElementById('stopAllBtn');
+      btn.disabled = true;
+      btn.textContent = '⏳ Stopping...';
+      
+      try {
+        const count = monitoringPorts.size;
+        const resp = await fetch('/api/monitor/stop-all', { method: 'POST' });
+        const data = await resp.json();
+        monitoringPorts.clear();
+        showToast('⏹ Stopped ' + (data.stopped || count) + ' monitor(s)', 'info');
+        await scanPorts();
+      } catch (err) {
+        console.error('Failed to stop all:', err);
+        showToast('Failed to stop monitors: ' + err.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = '⏹ Stop All';
       }
     }
 
-    const portPanels = new PortPanels();
-
     function connect() {
-      if (es) { es.close(); }
+      if (es) es.close();
       es = new EventSource('/events');
-      es.onopen = () => { statusEl.textContent = 'connected'; };
-      es.onerror = () => { statusEl.textContent = 'disconnected (retrying)'; };
+      es.onopen = () => setStatus(true, 'Connected');
+      es.onerror = () => setStatus(false, 'Disconnected (retrying...)');
       es.onmessage = (ev) => {
         try {
           const data = JSON.parse(ev.data);
-          if (data.type === 'serial' || data.type === 'serial_end') {
-            portPanels.append(data);
+          if (data.type === 'serial') {
+            appendLog(data);
+          } else if (data.type === 'serial_end') {
+            const port = data.port;
+            monitoringPorts.delete(port);
+            appendLog({ ...data, line: '<Monitor ended: ' + (data.reason || 'unknown') + '>' });
           }
         } catch (e) { /* ignore */ }
       };
     }
+    
     function disconnect() {
       if (es) { es.close(); es = null; }
-      statusEl.textContent = 'stopped';
+      setStatus(false, 'Stopped');
     }
-    function reconnect() {
-      connect();
+    
+    // Device info and MAC extraction
+    const macPatterns = [
+      /MAC[:\\s]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/gi,
+      /WiFi[:\\s]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/gi,
+      /BT[:\\s]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/gi,
+      /efuse[:\\s]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/gi,
+    ];
+    const deviceInfo = new Map(); // port -> { wifiMac, btMac, chipId, ... }
+    
+    function extractMacFromLogs(port) {
+      const portData = portPanels.get(port);
+      if (!portData) return null;
+      
+      const info = { wifiMac: null, btMac: null, chipId: null, freeHeap: null };
+      const logText = Array.from(portData.body.querySelectorAll('.log-content')).map(el => el.textContent).join('\\n');
+      
+      // Extract WiFi MAC
+      const wifiMatch = logText.match(/(?:WiFi|STA)[^0-9A-Fa-f]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/i);
+      if (wifiMatch) info.wifiMac = wifiMatch[0].match(/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/i)?.[0];
+      
+      // Extract BT MAC
+      const btMatch = logText.match(/(?:BT|Bluetooth)[^0-9A-Fa-f]*([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/i);
+      if (btMatch) info.btMac = btMatch[0].match(/([0-9A-Fa-f]{2}[:-]){5}[0-9A-Fa-f]{2}/i)?.[0];
+      
+      // Extract Chip ID
+      const chipMatch = logText.match(/Chip\\s*(?:ID|Rev)[^:]*:\\s*([0-9A-Fa-fx]+)/i);
+      if (chipMatch) info.chipId = chipMatch[1];
+      
+      // Extract Free Heap
+      const heapMatch = logText.match(/(?:Free\\s*)?[Hh]eap[^:]*:\\s*(\\d+)/i);
+      if (heapMatch) info.freeHeap = parseInt(heapMatch[1]);
+      
+      deviceInfo.set(port, info);
+      return info;
     }
+    
+    function updateDeviceInfoPanel() {
+      const panel = document.getElementById('deviceInfoPanel');
+      const ports = Array.from(portPanels.keys());
+      
+      if (ports.length === 0) {
+        panel.innerHTML = '<div class="empty-state" style="padding: 20px;"><p>No active ports</p></div>';
+        return;
+      }
+      
+      let html = '';
+      for (const port of ports) {
+        const info = extractMacFromLogs(port) || {};
+        html += '<div class="control-section" style="border-bottom: 1px solid var(--border); padding-bottom: 10px; margin-bottom: 10px;">';
+        html += '<span class="control-label">' + escapeHtml(port) + '</span>';
+        html += '<div style="font-size: 12px; font-family: monospace;">';
+        html += '<div>WiFi MAC: <span style="color: var(--accent);">' + (info.wifiMac || 'Scanning...') + '</span></div>';
+        html += '<div>BT MAC: <span style="color: var(--accent);">' + (info.btMac || 'Scanning...') + '</span></div>';
+        if (info.chipId) html += '<div>Chip: ' + info.chipId + '</div>';
+        if (info.freeHeap) html += '<div>Heap: ' + info.freeHeap.toLocaleString() + ' bytes</div>';
+        html += '</div></div>';
+      }
+      panel.innerHTML = html || '<div class="empty-state"><p>No device info available</p></div>';
+    }
+    
+    document.getElementById('refreshDeviceInfoBtn').onclick = updateDeviceInfoPanel;
+    
+    // Firmware upload functionality
+    let availableArtifacts = [];
+    
+    async function scanArtifacts() {
+      try {
+        const resp = await fetch('/api/artifacts');
+        const data = await resp.json();
+        availableArtifacts = data.artifacts || [];
+        const select = document.getElementById('artifactSelect');
+        select.innerHTML = '<option value="">-- Select firmware (' + availableArtifacts.length + ' found) --</option>';
+        for (const art of availableArtifacts) {
+          const opt = document.createElement('option');
+          opt.value = art.path;
+          opt.textContent = art.name + ' (' + art.size + ')';
+          select.appendChild(opt);
+        }
+      } catch (err) {
+        console.error('Failed to scan artifacts:', err);
+      }
+    }
+    
+    async function uploadFirmware(ports, firmwarePath, eraseFirst) {
+      if (!firmwarePath) {
+        alert('Please select a firmware file first');
+        return;
+      }
+      if (ports.length === 0) {
+        alert('No ports selected');
+        return;
+      }
+      
+      for (const port of ports) {
+        try {
+          if (eraseFirst) {
+            const eraseResp = await fetch('/api/erase', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ port })
+            });
+            const eraseData = await eraseResp.json();
+            if (!eraseData.ok) {
+              console.error('Erase failed for ' + port + ':', eraseData.error);
+            }
+          }
+          
+          const uploadResp = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ port, firmware_path: firmwarePath })
+          });
+          const uploadData = await uploadResp.json();
+          if (uploadData.ok) {
+            console.log('Upload successful for ' + port);
+          } else {
+            console.error('Upload failed for ' + port + ':', uploadData.error);
+          }
+        } catch (err) {
+          console.error('Upload error for ' + port + ':', err);
+        }
+      }
+      alert('Upload complete! Check console for details.');
+    }
+    
+    document.getElementById('scanArtifactsBtn').onclick = scanArtifacts;
+    
+    document.getElementById('uploadFirmwareBtn').onclick = () => {
+      const firmware = document.getElementById('artifactSelect').value;
+      const eraseFirst = document.getElementById('eraseBeforeFlash').checked;
+      const activePorts = Array.from(monitoringPorts);
+      if (activePorts.length === 0) {
+        alert('No active monitors. Please start monitoring first.');
+        return;
+      }
+      uploadFirmware(activePorts, firmware, eraseFirst);
+    };
+    
+    document.getElementById('uploadAllBtn').onclick = async () => {
+      const firmware = document.getElementById('artifactSelect').value;
+      const eraseFirst = document.getElementById('eraseBeforeFlash').checked;
+      try {
+        const resp = await fetch('/api/ports');
+        const data = await resp.json();
+        const esp32Ports = (data.ports || []).filter(p => p.isEsp32).map(p => p.port);
+        if (esp32Ports.length === 0) {
+          alert('No ESP32 devices found');
+          return;
+        }
+        uploadFirmware(esp32Ports, firmware, eraseFirst);
+      } catch (err) {
+        console.error('Failed to get ports:', err);
+      }
+    };
+    
+    // Settings
+    function getSettings() {
+      return {
+        fqbn: document.getElementById('fqbnSelect').value,
+        partition: document.getElementById('partitionSelect').value,
+        flashMode: document.getElementById('flashModeSelect').value,
+      };
+    }
+    
+    // Periodic device info update
+    setInterval(() => {
+      if (portPanels.size > 0) {
+        updateDeviceInfoPanel();
+      }
+    }, 5000);
+    
+    // Initial load
     connect();
+    scanPorts();
+    scanArtifacts();
   </script>
 </body>
 </html>`;
@@ -1092,29 +2273,266 @@ class ConsoleServer {
     return { ok: true, host: options.host, port: options.port };
   }
 
-  private handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+  private async handleRequest(req: http.IncomingMessage, res: http.ServerResponse) {
+    const corsHeaders = {
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    };
+
     if (!req.url) {
-      res.writeHead(404); res.end(); return;
+      res.writeHead(404, corsHeaders);
+      res.end();
+      return;
     }
+
+    // Handle CORS preflight
+    if (req.method === 'OPTIONS') {
+      res.writeHead(200, corsHeaders);
+      res.end();
+      return;
+    }
+
+    // SSE events endpoint
     if (req.url.startsWith('/events')) {
       res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
         Connection: 'keep-alive',
-        'Access-Control-Allow-Origin': '*',
+        ...corsHeaders,
       });
       res.write(': connected\n\n');
       serialBroadcaster.addClient(res);
       req.on('close', () => serialBroadcaster.removeClient(res));
       return;
     }
+
+    // Health check
     if (req.url.startsWith('/health')) {
-      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
       res.end(JSON.stringify({ ok: true }));
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+
+    // API: Get available ports
+    if (req.url.startsWith('/api/ports')) {
+      try {
+        const detection = await detectEsp32Ports(10);
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, ports: detection.ports }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Start monitor
+    if (req.url.startsWith('/api/monitor/start') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const params = JSON.parse(body);
+        const session = await monitorManager.start({
+          port: params.port,
+          baud: params.baud ?? 115200,
+          auto_baud: params.auto_baud ?? true,
+          raw: false,
+          max_seconds: params.max_seconds ?? 0,
+          max_lines: 0,
+          stop_on: params.stop_on,
+          detect_reboot: true,
+        });
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, token: session.token, port: session.port, baud: session.baud }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Stop monitor
+    if (req.url.startsWith('/api/monitor/stop') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const params = JSON.parse(body);
+        const session = monitorManager.get(params.token, params.port);
+        if (session) {
+          await session.stop();
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true }));
+        } else {
+          res.writeHead(404, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'Monitor not found' }));
+        }
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Stop all monitors
+    if (req.url.startsWith('/api/monitor/stop-all') && req.method === 'POST') {
+      try {
+        const tokens = monitorManager.listTokens();
+        for (const token of tokens) {
+          const session = monitorManager.get(token);
+          if (session) {
+            await session.stop();
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, stopped: tokens.length }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Get active monitors
+    if (req.url.startsWith('/api/monitors')) {
+      const tokens = monitorManager.listTokens();
+      const monitors = tokens.map((token) => {
+        const session = monitorManager.get(token);
+        return session ? { token, port: session.port, baud: session.baud } : null;
+      }).filter(Boolean);
+      res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({ ok: true, monitors }));
+      return;
+    }
+
+    // API: Get logs (for MCP to read)
+    if (req.url.startsWith('/api/logs')) {
+      res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+      res.end(JSON.stringify({ ok: true, logs: serialBroadcaster.getBuffer() }));
+      return;
+    }
+
+    // API: Scan for build artifacts
+    if (req.url.startsWith('/api/artifacts')) {
+      try {
+        const artifacts: Array<{ path: string; name: string; size: string }> = [];
+        const searchDirs = [TEMP_DIR, path.join(PROJECT_ROOT, 'build'), path.join(PROJECT_ROOT, '.build')];
+        
+        for (const dir of searchDirs) {
+          if (await pathExists(dir)) {
+            const files = await collectArtifacts(dir);
+            for (const file of files) {
+              if (file.endsWith('.bin')) {
+                try {
+                  const stat = await fs.stat(file);
+                  artifacts.push({
+                    path: file,
+                    name: path.basename(file),
+                    size: (stat.size / 1024).toFixed(1) + ' KB',
+                  });
+                } catch (e) {
+                  // ignore
+                }
+              }
+            }
+          }
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, artifacts }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Erase flash
+    if (req.url.startsWith('/api/erase') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const params = JSON.parse(body);
+        const result = await execa(PYTHON, ['-m', 'esptool', '--port', params.port, 'erase_flash'], { reject: false });
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: result.exitCode === 0, stdout: result.stdout, stderr: result.stderr }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Upload firmware
+    if (req.url.startsWith('/api/upload') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const params = JSON.parse(body);
+        
+        if (!params.firmware_path || !params.port) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'Missing firmware_path or port' }));
+          return;
+        }
+        
+        // Upload using esptool.py
+        const result = await execa(PYTHON, [
+          '-m', 'esptool',
+          '--chip', 'esp32',
+          '--port', params.port,
+          '--baud', '921600',
+          'write_flash',
+          '0x10000', // App partition offset
+          params.firmware_path,
+        ], { reject: false, timeout: 120000 });
+        
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: result.exitCode === 0, stdout: result.stdout, stderr: result.stderr }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Get device info by querying serial
+    if (req.url.startsWith('/api/device-info')) {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const port = url.searchParams.get('port');
+        
+        if (!port) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'Missing port parameter' }));
+          return;
+        }
+        
+        // Try to get MAC from esptool
+        const result = await execa(PYTHON, ['-m', 'esptool', '--port', port, 'read_mac'], { reject: false, timeout: 10000 });
+        
+        let mac = null;
+        const macMatch = result.stdout.match(/MAC:\\s*([0-9a-fA-F:]+)/);
+        if (macMatch) {
+          mac = macMatch[1];
+        }
+        
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, mac, stdout: result.stdout }));
+      } catch (error) {
+        res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // Serve HTML console
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8', ...corsHeaders });
     res.end(CONSOLE_HTML);
+  }
+
+  private readBody(req: http.IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      let body = '';
+      req.on('data', (chunk) => { body += chunk; });
+      req.on('end', () => resolve(body));
+      req.on('error', reject);
+    });
   }
 }
 
@@ -2201,6 +3619,355 @@ async function runStartConsole(args: z.infer<typeof startConsoleSchema>) {
   }
 }
 
+async function runEraseFlash(args: z.infer<typeof eraseFlashSchema>) {
+  try {
+    // Use esptool.py to erase flash (bundled with ESP32 Arduino core)
+    const result = await cli.run(['burn-bootloader', '--fqbn', DEFAULT_FQBN, '--port', args.port], { timeoutMs: 120000 });
+    if (result.exitCode !== 0) {
+      // Fallback: try using esptool.py directly if available
+      const esptoolResult = await execa(PYTHON, ['-m', 'esptool', '--port', args.port, 'erase_flash'], { reject: false });
+      if (esptoolResult.exitCode === 0) {
+        return toToolResult({ ok: true, stdout: esptoolResult.stdout }, 'Flash erased successfully');
+      }
+      return toToolResult({ ok: false, exitCode: result.exitCode, stderr: result.stderr, stdout: result.stdout }, 'Flash erase failed');
+    }
+    return toToolResult({ ok: true, stdout: result.stdout }, 'Flash erased successfully');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return toToolResult({ ok: false, error: message }, message);
+  }
+}
+
+async function runSpiffsUpload(args: z.infer<typeof spiffsUploadSchema>) {
+  try {
+    const dataDir = path.resolve(args.data_dir);
+    if (!(await pathExists(dataDir))) {
+      return toToolResult({ ok: false, error: `Data directory not found: ${dataDir}` }, 'Data directory not found');
+    }
+
+    // Check if mkspiffs is available
+    const mkspiffsResult = await execa('which', ['mkspiffs'], { reject: false });
+    if (mkspiffsResult.exitCode !== 0) {
+      return toToolResult(
+        { ok: false, error: 'mkspiffs not found. Install it via: brew install mkspiffs (macOS) or your package manager.' },
+        'mkspiffs tool not found. Please install it first.',
+      );
+    }
+
+    // Create SPIFFS image
+    const spiffsImage = path.join(TEMP_DIR, `spiffs_${Date.now()}.bin`);
+    await ensureDirectory(TEMP_DIR);
+
+    // Default SPIFFS parameters for ESP32 (1.5MB SPIFFS partition)
+    const mkResult = await execa('mkspiffs', [
+      '-c', dataDir,
+      '-b', '4096',
+      '-p', '256',
+      '-s', '1507328', // 0x170000 = 1507328 bytes for default spiffs partition
+      spiffsImage,
+    ], { reject: false });
+
+    if (mkResult.exitCode !== 0) {
+      return toToolResult({ ok: false, error: 'Failed to create SPIFFS image', stderr: mkResult.stderr }, 'Failed to create SPIFFS image');
+    }
+
+    // Upload using esptool.py
+    // Default SPIFFS partition starts at 0x290000 for ESP32
+    const uploadResult = await execa(PYTHON, [
+      '-m', 'esptool',
+      '--chip', 'esp32',
+      '--port', args.port,
+      '--baud', '921600',
+      'write_flash',
+      '0x290000', // Default SPIFFS partition offset
+      spiffsImage,
+    ], { reject: false });
+
+    // Clean up
+    await fs.rm(spiffsImage, { force: true });
+
+    if (uploadResult.exitCode !== 0) {
+      return toToolResult({ ok: false, error: 'Failed to upload SPIFFS', stderr: uploadResult.stderr }, 'Failed to upload SPIFFS image');
+    }
+
+    return toToolResult({ ok: true, stdout: uploadResult.stdout }, 'SPIFFS data uploaded successfully');
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return toToolResult({ ok: false, error: message }, message);
+  }
+}
+
+function runGetLogs(args: z.infer<typeof getLogsSchema>) {
+  const buffer = serialBroadcaster.getBuffer();
+  let logs = buffer.filter((evt) => evt.type === 'serial');
+
+  // Filter by port
+  if (args.port) {
+    logs = logs.filter((evt) => evt.port === args.port);
+  }
+
+  // Filter by pattern
+  if (args.pattern) {
+    try {
+      const regex = new RegExp(args.pattern, 'i');
+      logs = logs.filter((evt) => evt.line && regex.test(evt.line));
+    } catch (error) {
+      return toToolResult({ ok: false, error: 'Invalid regex pattern' }, 'Invalid regex pattern');
+    }
+  }
+
+  // Limit lines
+  const limitedLogs = logs.slice(-args.max_lines);
+
+  // Format output
+  const formattedLogs = limitedLogs.map((evt) => ({
+    timestamp: evt.timestamp,
+    port: evt.port,
+    line: evt.line,
+    baud: evt.baud,
+  }));
+
+  const summary = `Retrieved ${formattedLogs.length} log lines` + (args.port ? ` from ${args.port}` : '');
+  return toToolResult({ ok: true, logs: formattedLogs, count: formattedLogs.length }, summary);
+}
+
+const BLINK_SKETCH = `// ESP32 Blink Example - Generated by MCP Arduino ESP32
+// This sketch blinks the built-in LED to verify your setup is working.
+
+#define LED_BUILTIN 2  // ESP32 DevKitC built-in LED
+
+void setup() {
+  Serial.begin(115200);
+  delay(1000);
+  Serial.println("ESP32 Blink Example Starting...");
+  Serial.println("If you see this message, serial communication is working!");
+  
+  pinMode(LED_BUILTIN, OUTPUT);
+  Serial.println("LED initialized on GPIO 2");
+}
+
+void loop() {
+  digitalWrite(LED_BUILTIN, HIGH);
+  Serial.println("LED ON");
+  delay(1000);
+  
+  digitalWrite(LED_BUILTIN, LOW);
+  Serial.println("LED OFF");
+  delay(1000);
+}
+`;
+
+async function runQuickstart(args: z.infer<typeof quickstartSchema>) {
+  const steps: Array<{ step: string; ok: boolean; message: string; detail?: unknown }> = [];
+
+  // Step 1: Ensure dependencies
+  steps.push({ step: 'check_dependencies', ok: true, message: 'Checking dependencies...' });
+  const depsReport = await dependencyManager.ensureAll({ installMissing: true });
+  if (!depsReport.ok) {
+    steps[steps.length - 1] = {
+      step: 'check_dependencies',
+      ok: false,
+      message: 'Dependency setup failed',
+      detail: depsReport,
+    };
+    return toToolResult(
+      { ok: false, stage: 'dependencies', steps, report: depsReport },
+      'Quickstart failed: Could not set up dependencies. Check that Python3 is installed.',
+    );
+  }
+  steps[steps.length - 1] = {
+    step: 'check_dependencies',
+    ok: true,
+    message: 'Dependencies ready',
+    detail: {
+      arduinoCli: depsReport.arduinoCli.version,
+      python: depsReport.python.version,
+      pyserial: depsReport.python.pyserialInstalled,
+    },
+  };
+
+  // Step 2: Ensure ESP32 core
+  steps.push({ step: 'ensure_core', ok: true, message: 'Installing ESP32 core...' });
+  const coreResult = await ensureEsp32Core();
+  const coreData = coreResult.structuredContent as { ok?: boolean; alreadyInstalled?: boolean } | undefined;
+  if (!coreData?.ok) {
+    steps[steps.length - 1] = {
+      step: 'ensure_core',
+      ok: false,
+      message: 'Failed to install ESP32 core',
+      detail: coreResult,
+    };
+    return toToolResult(
+      { ok: false, stage: 'ensure_core', steps },
+      'Quickstart failed: Could not install ESP32 core.',
+    );
+  }
+  steps[steps.length - 1] = {
+    step: 'ensure_core',
+    ok: true,
+    message: coreData.alreadyInstalled ? 'ESP32 core already installed' : 'ESP32 core installed',
+  };
+
+  // Step 3: Detect ESP32 boards
+  steps.push({ step: 'detect_boards', ok: true, message: 'Detecting ESP32 boards...' });
+  const detection = await detectEsp32Ports(10);
+  let targetPort = args.port;
+  if (!targetPort && detection.ports.length > 0) {
+    targetPort = detection.ports[0].port;
+  }
+  if (!targetPort) {
+    steps[steps.length - 1] = {
+      step: 'detect_boards',
+      ok: false,
+      message: 'No ESP32 boards detected. Connect a board via USB and try again.',
+      detail: detection,
+    };
+    return toToolResult(
+      { ok: false, stage: 'detect_boards', steps, detection },
+      'Quickstart failed: No ESP32 boards detected. Connect an ESP32 via USB.',
+    );
+  }
+  steps[steps.length - 1] = {
+    step: 'detect_boards',
+    ok: true,
+    message: `Found ESP32 on ${targetPort}`,
+    detail: { port: targetPort, allPorts: detection.ports.map((p) => p.port) },
+  };
+
+  // Step 4: Prepare sketch
+  let sketchPath = args.sketch_path;
+  let createdSketch = false;
+  if (!sketchPath) {
+    // Create blink example
+    const blinkDir = path.join(TEMP_DIR, 'blink_example');
+    await ensureDirectory(blinkDir);
+    const blinkPath = path.join(blinkDir, 'blink_example.ino');
+    await fs.writeFile(blinkPath, BLINK_SKETCH, 'utf8');
+    sketchPath = blinkDir;
+    createdSketch = true;
+    steps.push({
+      step: 'prepare_sketch',
+      ok: true,
+      message: 'Created blink example sketch',
+      detail: { path: sketchPath },
+    });
+  } else {
+    steps.push({
+      step: 'prepare_sketch',
+      ok: true,
+      message: `Using existing sketch: ${sketchPath}`,
+    });
+  }
+
+  // Step 5: Compile
+  steps.push({ step: 'compile', ok: true, message: 'Compiling sketch...' });
+  const compileResult = await runCompile({
+    sketch_path: sketchPath,
+    export_bin: true,
+    clean: false,
+    build_props: [],
+  });
+  if (!compileResult.ok) {
+    steps[steps.length - 1] = {
+      step: 'compile',
+      ok: false,
+      message: 'Compilation failed',
+      detail: {
+        errors: compileResult.diagnostics.filter((d) => d.level === 'error'),
+        exitCode: compileResult.exitCode,
+      },
+    };
+    return toToolResult(
+      { ok: false, stage: 'compile', steps, compile: compileResult },
+      `Quickstart failed: Compilation error. ${compileResult.diagnostics.filter((d) => d.level === 'error').map((d) => d.message).join('; ')}`,
+    );
+  }
+  steps[steps.length - 1] = {
+    step: 'compile',
+    ok: true,
+    message: `Compiled successfully (${compileResult.durationMs}ms)`,
+    detail: { artifacts: compileResult.artifacts.length },
+  };
+
+  // Step 6: Upload
+  steps.push({ step: 'upload', ok: true, message: `Uploading to ${targetPort}...` });
+  const uploadResult = await runUpload({
+    sketch_path: sketchPath,
+    port: targetPort,
+    build_path: compileResult.buildPath,
+    verify: false,
+  });
+  if (!uploadResult.ok) {
+    steps[steps.length - 1] = {
+      step: 'upload',
+      ok: false,
+      message: 'Upload failed',
+      detail: { stderr: uploadResult.stderr, exitCode: uploadResult.exitCode },
+    };
+    return toToolResult(
+      { ok: false, stage: 'upload', steps, upload: uploadResult },
+      'Quickstart failed: Upload error. Check USB connection and port permissions.',
+    );
+  }
+  steps[steps.length - 1] = {
+    step: 'upload',
+    ok: true,
+    message: `Uploaded successfully (${uploadResult.durationMs}ms)`,
+  };
+
+  // Step 7: Monitor
+  steps.push({ step: 'monitor', ok: true, message: `Monitoring serial output for ${args.monitor_seconds}s...` });
+  const session = new MonitorSession(
+    {
+      port: targetPort,
+      baud: 115200,
+      autoBaud: true,
+      raw: false,
+      maxSeconds: args.monitor_seconds,
+      maxLines: 0,
+      stopRegex: undefined,
+      detectReboot: true,
+    },
+    randomUUID(),
+  );
+  await session.start();
+  const monitorSummary = await session.onComplete();
+  steps[steps.length - 1] = {
+    step: 'monitor',
+    ok: true,
+    message: `Captured ${monitorSummary.lines} lines in ${monitorSummary.elapsedSeconds.toFixed(1)}s`,
+    detail: {
+      baud: monitorSummary.baud,
+      lastLine: monitorSummary.lastLine,
+      rebootDetected: monitorSummary.rebootDetected,
+    },
+  };
+
+  const successMessage = createdSketch
+    ? `Quickstart complete! Blink example is running on ${targetPort}. The LED on GPIO 2 should be blinking.`
+    : `Quickstart complete! Your sketch is running on ${targetPort}.`;
+
+  return toToolResult(
+    {
+      ok: true,
+      stage: 'complete',
+      steps,
+      port: targetPort,
+      sketchPath,
+      createdSketch,
+      compile: {
+        durationMs: compileResult.durationMs,
+        artifacts: compileResult.artifacts.length,
+      },
+      upload: {
+        durationMs: uploadResult.durationMs,
+      },
+      monitor: monitorSummary,
+    },
+    successMessage,
+  );
+}
+
 server.registerTool('version', {
   title: 'arduino-cli version',
   description: 'Show the installed arduino-cli version in JSON when available',
@@ -2216,6 +3983,12 @@ server.registerTool('ensure_dependencies', {
   description: 'Bundle arduino-cli into vendor/, ensure .venv with pyserial, and report versions',
   inputSchema: ensureDependenciesSchema.shape,
 }, async (params) => runEnsureDependencies(ensureDependenciesSchema.parse(params)));
+
+server.registerTool('quickstart', {
+  title: 'Quickstart ESP32 Development',
+  description: 'One-click setup: installs dependencies, detects ESP32, compiles & uploads a blink example, and shows serial output. Perfect for beginners or verifying a new board.',
+  inputSchema: quickstartSchema.shape,
+}, async (params) => runQuickstart(quickstartSchema.parse(params)));
 
 server.registerTool('start_console', {
   title: 'Start Serial Console (SSE)',
@@ -2235,11 +4008,12 @@ server.registerTool('lib_list', {
 
 server.registerTool('lib_install', {
   title: 'Install Library',
-  description: 'Install an Arduino library by name',
-  inputSchema: {
-    name: z.string(),
-  },
-}, async ({ name }) => installLibrary(name));
+  description: 'Install an Arduino library by name (e.g., "ArduinoJson", "Adafruit NeoPixel")',
+  inputSchema: libInstallSchema.shape,
+}, async (params) => {
+  const { name } = libInstallSchema.parse(params);
+  return installLibrary(name);
+});
 
 server.registerTool('compile', {
   title: 'Compile Sketch',
@@ -2349,6 +4123,24 @@ server.registerTool('flash_connected', {
   description: 'Detect connected ESP32 USB serial ports (<=10), compile into Temp/<timestamp>, and upload in parallel',
   inputSchema: flashConnectedSchema.shape,
 }, async (params) => runFlashConnected(flashConnectedSchema.parse(params)));
+
+server.registerTool('erase_flash', {
+  title: 'Erase ESP32 Flash',
+  description: 'Completely erase the flash memory of an ESP32 board. Useful before fresh install.',
+  inputSchema: eraseFlashSchema.shape,
+}, async (params) => runEraseFlash(eraseFlashSchema.parse(params)));
+
+server.registerTool('spiffs_upload', {
+  title: 'Upload SPIFFS Data',
+  description: 'Upload a data directory to ESP32 SPIFFS partition. Requires mkspiffs and esptool.',
+  inputSchema: spiffsUploadSchema.shape,
+}, async (params) => runSpiffsUpload(spiffsUploadSchema.parse(params)));
+
+server.registerTool('get_logs', {
+  title: 'Get Serial Logs',
+  description: 'Retrieve buffered serial logs from active monitors. Useful for AI-driven verification.',
+  inputSchema: getLogsSchema.shape,
+}, async (params) => runGetLogs(getLogsSchema.parse(params)));
 
 async function main() {
   const transport = new StdioServerTransport();
