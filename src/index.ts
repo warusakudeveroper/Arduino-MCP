@@ -31,9 +31,10 @@ import {
   resolveSketchPath,
   collectFiles,
 } from './utils/fs.js';
+import { arduinoCliRunner } from './utils/cli-runner.js';
+// Pin analysis is also available from ./utils/pin-analysis.js for external use
 import type {
   WorkspaceConfig,
-  DetectedPortInfo,
   UnknownIdentifier,
 } from './types.js';
 import type {
@@ -260,7 +261,7 @@ function resolvePythonExecutable(): string {
   return 'python3';
 }
 
-let ARDUINO_CLI = resolveArduinoCliExecutable();
+// ARDUINO_CLI is managed by utils/cli-runner.ts via arduinoCliRunner
 const ARTIFACT_EXTENSIONS = new Set(['.bin', '.elf', '.map', '.hex']);
 
 // Serial monitor scripts moved to ./serial/monitor.ts
@@ -367,41 +368,12 @@ class InvalidRegexError extends Error {
   }
 }
 
-class ArduinoCliRunner {
-  constructor(private executable: string) {}
-
-  setExecutable(executable: string) {
-    this.executable = executable;
-  }
-
-  getExecutable() {
-    return this.executable;
-  }
-
-  async run(args: string[], options?: { cwd?: string; env?: Record<string, string>; timeoutMs?: number }) {
-    const mergedEnv = { ...process.env, ...(options?.env ?? {}) };
-    const subprocess = execa(this.executable, args, {
-      cwd: options?.cwd,
-      env: mergedEnv,
-      stdout: 'pipe',
-      stderr: 'pipe',
-      reject: false,
-      timeout: options?.timeoutMs,
-    });
-    const result = await subprocess;
-    return {
-      exitCode: result.exitCode ?? 0,
-      stdout: result.stdout ?? '',
-      stderr: result.stderr ?? '',
-    };
-  }
-}
-
-const cli = new ArduinoCliRunner(ARDUINO_CLI);
+// ArduinoCliRunner class is now imported from utils/cli-runner.ts
+// Use arduinoCliRunner singleton instance
+const cli = arduinoCliRunner;
 
 function updateArduinoCliPath(executable: string) {
-  ARDUINO_CLI = executable;
-  cli.setExecutable(executable);
+  arduinoCliRunner.setExecutable(executable);
 }
 
 function updatePythonExecutable(pythonPath: string) {
@@ -1137,97 +1109,10 @@ async function analyzePinUsage(sketchPath: string, includeHeaders: boolean) {
 }
 
 // runCompile and runUpload are imported from ./mcp/tools/index.js
+// detectEsp32Ports is now implemented in arduinoCliRunner.detectPorts()
 
-async function detectEsp32Ports(maxPorts: number): Promise<{
-  ok: boolean;
-  ports: DetectedPortInfo[];
-  raw?: unknown;
-  stdout?: string;
-  stderr?: string;
-}> {
-  const result = await cli.run(['board', 'list', '--format', 'json']);
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.stdout);
-  } catch (error) {
-    parsed = undefined;
-  }
-
-  const ports: DetectedPortInfo[] = [];
-  
-  // Support both old format (ports) and new format (detected_ports)
-  const parsedObj = parsed as { ports?: unknown[]; detected_ports?: unknown[] } | undefined;
-  const rawEntries = Array.isArray(parsedObj?.detected_ports)
-    ? parsedObj.detected_ports
-    : Array.isArray(parsedObj?.ports)
-      ? parsedObj.ports
-      : [];
-  const entries = rawEntries as Array<Record<string, unknown>>;
-
-  for (const entry of entries) {
-    // New format: { port: { address: "..." }, matching_boards: [...] }
-    // Old format: { address: "...", matching_boards: [...] }
-    const portObj = entry.port as Record<string, unknown> | undefined;
-    const address = (portObj?.address as string | undefined)
-      ?? (entry.address as string | undefined)
-      ?? (entry.port as string | undefined)
-      ?? (entry.address_label as string | undefined)
-      ?? (entry.com_name as string | undefined);
-    if (!address) {
-      continue;
-    }
-    
-    const boardsRaw = [
-      ...(Array.isArray(entry.matching_boards) ? entry.matching_boards : []),
-      ...(Array.isArray(entry.boards) ? entry.boards : []),
-    ] as Array<Record<string, unknown>>;
-    
-    // Check if it's an ESP32 by matching_boards or by port name pattern
-    const matching = boardsRaw.find((board) => {
-      const name = (board.FQBN as string | undefined)
-        ?? (board.fqbn as string | undefined)
-        ?? (board.name as string | undefined)
-        ?? (board.boardName as string | undefined)
-        ?? '';
-      return name.toLowerCase().includes('esp32');
-    });
-    
-    // Also detect ESP32 by common USB-to-serial chip patterns (CP210x, CH340, etc)
-    const isEsp32ByPort = /SLAB_USBtoUART|usbserial|wchusbserial|CP210|CH340/i.test(address);
-    
-    const matchingFqbn = (matching?.FQBN as string | undefined)
-      ?? (matching?.fqbn as string | undefined)
-      ?? (matching?.name as string | undefined)
-      ?? (matching?.boardName as string | undefined);
-
-    const label = (portObj?.label as string | undefined)
-      ?? (entry.label as string | undefined)
-      ?? (entry.address_label as string | undefined)
-      ?? (entry.identification as string | undefined)
-      ?? (entry.port_label as string | undefined);
-      
-    const props = (portObj?.properties ?? entry.properties) as { product?: string; vendor?: string } | undefined;
-
-    ports.push({
-      port: address,
-      protocol: (portObj?.protocol as string | undefined) ?? (entry.protocol as string | undefined) ?? (entry.protocol_label as string | undefined),
-      label,
-      product: props?.product,
-      vendor: props?.vendor,
-      matchingFqbn,
-      isEsp32: Boolean(matching) || isEsp32ByPort,
-      reachable: fsSync.existsSync(address),
-    });
-  }
-
-  const esp32Ports = ports.filter((port) => port.isEsp32).slice(0, Math.max(1, maxPorts));
-  return {
-    ok: result.exitCode === 0 && esp32Ports.length > 0,
-    ports: esp32Ports,
-    raw: parsed,
-    stdout: result.stdout,
-    stderr: result.stderr,
-  };
+async function detectEsp32Ports(maxPorts: number) {
+  return arduinoCliRunner.detectPorts({ maxPorts });
 }
 
 // MonitorManager is imported from ./serial/index.js

@@ -4,7 +4,7 @@
  */
 
 import * as http from 'http';
-import * as fsSync from 'fs';
+// fsSync no longer needed - detectPorts handles file existence check
 import * as path from 'path';
 import { serialBroadcaster } from '../serial/broadcaster.js';
 import { monitorManager } from '../serial/monitor.js';
@@ -41,64 +41,13 @@ async function collectArtifacts(dir: string): Promise<string[]> {
 }
 
 async function detectEsp32Ports(): Promise<DetectedPortInfo[]> {
-  const result = await arduinoCliRunner.run(['board', 'list', '--format', 'json']);
+  const result = await arduinoCliRunner.detectPorts({ includeNonEsp32: true });
   
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(result.stdout);
-  } catch {
-    logger.warn('Failed to parse board list JSON');
-    return [];
-  }
-
-  const ports: DetectedPortInfo[] = [];
-  const parsedObj = parsed as { ports?: unknown[]; detected_ports?: unknown[] } | undefined;
-  const rawEntries = Array.isArray(parsedObj?.detected_ports)
-    ? parsedObj.detected_ports
-    : Array.isArray(parsedObj?.ports)
-      ? parsedObj.ports
-      : [];
-
-  for (const entry of rawEntries as Array<Record<string, unknown>>) {
-    const portObj = entry.port as Record<string, unknown> | undefined;
-    const address = (portObj?.address as string | undefined)
-      ?? (entry.address as string | undefined)
-      ?? (entry.port as string | undefined);
-    
-    if (!address) continue;
-
-    const boardsRaw = [
-      ...(Array.isArray(entry.matching_boards) ? entry.matching_boards : []),
-      ...(Array.isArray(entry.boards) ? entry.boards : []),
-    ] as Array<Record<string, unknown>>;
-
-    const matching = boardsRaw.find((board) => {
-      const name = (board.FQBN as string | undefined)
-        ?? (board.fqbn as string | undefined)
-        ?? (board.name as string | undefined)
-        ?? '';
-      return name.toLowerCase().includes('esp32');
-    });
-
-    const isEsp32ByPort = /SLAB_USBtoUART|usbserial|wchusbserial|CP210|CH340/i.test(address);
-    const matchingFqbn = (matching?.FQBN as string | undefined)
-      ?? (matching?.fqbn as string | undefined);
-
-    const label = (portObj?.label as string | undefined)
-      ?? (entry.label as string | undefined);
-
-    ports.push({
-      port: address,
-      protocol: (portObj?.protocol as string | undefined) ?? (entry.protocol as string | undefined),
-      label,
-      matchingFqbn,
-      isEsp32: Boolean(matching) || isEsp32ByPort,
-      reachable: fsSync.existsSync(address),
-      nickname: workspaceConfigService.getPortNickname(address),
-    });
-  }
-
-  return ports;
+  // Add nicknames to ports
+  return result.allPorts.map(port => ({
+    ...port,
+    nickname: workspaceConfigService.getPortNickname(port.port),
+  }));
 }
 
 /**

@@ -7,7 +7,7 @@ import { execa, ExecaError } from 'execa';
 import * as fs from 'fs/promises';
 import * as fsSync from 'fs';
 import * as path from 'path';
-import { CliRunResult } from '../types.js';
+import { CliRunResult, DetectedPortInfo } from '../types.js';
 import { createLogger } from './logger.js';
 import { PROJECT_ROOT } from '../config/workspace.js';
 
@@ -82,14 +82,19 @@ export class ArduinoCliRunner {
   /**
    * Run arduino-cli command
    */
-  async run(args: string[], options: { cwd?: string } = {}): Promise<CliRunResult> {
+  async run(
+    args: string[], 
+    options: { cwd?: string; env?: Record<string, string>; timeoutMs?: number } = {}
+  ): Promise<CliRunResult> {
     logger.debug('Running arduino-cli', { args, cwd: options.cwd });
     
     try {
+      const mergedEnv = { ...process.env, ...(options.env ?? {}) };
       const result = await execa(this.cliPath, args, {
         cwd: options.cwd,
+        env: mergedEnv,
         reject: false,
-        env: { ...process.env },
+        timeout: options.timeoutMs,
       });
 
       return {
@@ -110,6 +115,20 @@ export class ArduinoCliRunner {
         stderr: execaError.stderr ?? execaError.message,
       };
     }
+  }
+
+  /**
+   * Get executable path (alias for getPath)
+   */
+  getExecutable(): string {
+    return this.cliPath;
+  }
+
+  /**
+   * Set executable path (alias for setPath)
+   */
+  setExecutable(newPath: string): void {
+    this.setPath(newPath);
   }
 
   /**
@@ -136,6 +155,107 @@ export class ArduinoCliRunner {
   async isAvailable(): Promise<boolean> {
     const result = await this.getVersion();
     return result.ok;
+  }
+
+  /**
+   * Detect connected ESP32 ports
+   */
+  async detectPorts(options: { maxPorts?: number; includeNonEsp32?: boolean } = {}): Promise<{
+    ok: boolean;
+    ports: DetectedPortInfo[];
+    allPorts: DetectedPortInfo[];
+    raw?: unknown;
+    stdout?: string;
+    stderr?: string;
+  }> {
+    const result = await this.run(['board', 'list', '--format', 'json']);
+    
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(result.stdout);
+    } catch {
+      logger.warn('Failed to parse board list JSON');
+      return {
+        ok: false,
+        ports: [],
+        allPorts: [],
+        stdout: result.stdout,
+        stderr: result.stderr,
+      };
+    }
+
+    const ports: DetectedPortInfo[] = [];
+    const parsedObj = parsed as { ports?: unknown[]; detected_ports?: unknown[] } | undefined;
+    const rawEntries = Array.isArray(parsedObj?.detected_ports)
+      ? parsedObj.detected_ports
+      : Array.isArray(parsedObj?.ports)
+        ? parsedObj.ports
+        : [];
+
+    for (const entry of rawEntries as Array<Record<string, unknown>>) {
+      const portObj = entry.port as Record<string, unknown> | undefined;
+      const address = (portObj?.address as string | undefined)
+        ?? (entry.address as string | undefined)
+        ?? (entry.port as string | undefined)
+        ?? (entry.address_label as string | undefined)
+        ?? (entry.com_name as string | undefined);
+
+      if (!address) continue;
+
+      const boardsRaw = [
+        ...(Array.isArray(entry.matching_boards) ? entry.matching_boards : []),
+        ...(Array.isArray(entry.boards) ? entry.boards : []),
+      ] as Array<Record<string, unknown>>;
+
+      const matching = boardsRaw.find((board) => {
+        const name = (board.FQBN as string | undefined)
+          ?? (board.fqbn as string | undefined)
+          ?? (board.name as string | undefined)
+          ?? (board.boardName as string | undefined)
+          ?? '';
+        return name.toLowerCase().includes('esp32');
+      });
+
+      // Also detect ESP32 by common USB-to-serial chip patterns
+      const isEsp32ByPort = /SLAB_USBtoUART|usbserial|wchusbserial|CP210|CH340/i.test(address);
+
+      const matchingFqbn = (matching?.FQBN as string | undefined)
+        ?? (matching?.fqbn as string | undefined)
+        ?? (matching?.name as string | undefined)
+        ?? (matching?.boardName as string | undefined);
+
+      const label = (portObj?.label as string | undefined)
+        ?? (entry.label as string | undefined)
+        ?? (entry.address_label as string | undefined)
+        ?? (entry.identification as string | undefined)
+        ?? (entry.port_label as string | undefined);
+
+      const props = (portObj?.properties ?? entry.properties) as { product?: string; vendor?: string } | undefined;
+
+      ports.push({
+        port: address,
+        protocol: (portObj?.protocol as string | undefined) ?? (entry.protocol as string | undefined) ?? (entry.protocol_label as string | undefined),
+        label,
+        product: props?.product,
+        vendor: props?.vendor,
+        matchingFqbn,
+        isEsp32: Boolean(matching) || isEsp32ByPort,
+        reachable: fsSync.existsSync(address),
+      });
+    }
+
+    const esp32Ports = ports.filter((port) => port.isEsp32);
+    const maxPorts = options.maxPorts ?? esp32Ports.length;
+    const limitedPorts = esp32Ports.slice(0, Math.max(1, maxPorts));
+
+    return {
+      ok: result.exitCode === 0 && limitedPorts.length > 0,
+      ports: limitedPorts,
+      allPorts: options.includeNonEsp32 ? ports : esp32Ports,
+      raw: parsed,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    };
   }
 
   /**
