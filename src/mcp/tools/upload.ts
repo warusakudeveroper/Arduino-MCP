@@ -3,26 +3,17 @@
  * Arduino sketch upload functionality
  */
 
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import { z } from 'zod';
 import { uploadSchema } from '../schemas.js';
 import { arduinoCliRunner } from '../../utils/cli-runner.js';
 import { createLogger } from '../../utils/logger.js';
+import { resolveSketchPath } from '../../utils/fs.js';
 import type { UploadSummary } from '../../types.js';
 
 const logger = createLogger('Upload');
 
 const DEFAULT_FQBN = process.env.ESP32_FQBN ?? 'esp32:esp32:esp32';
-
-async function resolveSketchPath(sketchPath: string): Promise<string> {
-  const resolved = path.resolve(sketchPath);
-  const stat = await fs.stat(resolved);
-  if (stat.isDirectory()) {
-    return resolved;
-  }
-  return path.dirname(resolved);
-}
 
 type UploadParams = z.infer<typeof uploadSchema>;
 

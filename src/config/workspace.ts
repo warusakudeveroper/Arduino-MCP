@@ -10,6 +10,22 @@ import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('WorkspaceConfig');
 
+// Note: We define pathExists and ensureDirectory locally to avoid circular imports
+// (utils/fs.ts imports from logger, which is fine, but we want to keep this module independent)
+
+async function pathExists(p: string): Promise<boolean> {
+  try {
+    await fs.access(p);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureDirectory(dir: string): Promise<void> {
+  await fs.mkdir(dir, { recursive: true });
+}
+
 // Directory paths
 export const PROJECT_ROOT = process.cwd();
 export const WORKSPACE_DIRS = {
@@ -37,19 +53,6 @@ const DEFAULT_CONFIG: WorkspaceConfig = {
   additionalBuildDirs: [],
   portNicknames: {},
 };
-
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureDirectory(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-}
 
 /**
  * Workspace Configuration Service

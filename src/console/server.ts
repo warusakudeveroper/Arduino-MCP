@@ -4,6 +4,8 @@
  */
 
 import * as http from 'http';
+import * as fsSync from 'fs';
+import * as path from 'path';
 import { serialBroadcaster } from '../serial/broadcaster.js';
 import { monitorManager } from '../serial/monitor.js';
 import { 
@@ -13,16 +15,18 @@ import {
 } from '../config/workspace.js';
 import { arduinoCliRunner } from '../utils/cli-runner.js';
 import { createLogger } from '../utils/logger.js';
+import { pathExists, collectFiles } from '../utils/fs.js';
 import { DetectedPortInfo } from '../types.js';
 import { getConsoleHtml } from './html.js';
 import * as fs from 'fs/promises';
-import * as fsSync from 'fs';
-import * as path from 'path';
 
 const logger = createLogger('ConsoleServer');
 
 // CORS configuration
 const CORS_ORIGIN = process.env.MCP_CORS_ORIGIN || '*';
+
+// Binary file extensions for artifact collection
+const BIN_EXTENSIONS = new Set(['.bin']);
 
 function getCorsHeaders(): Record<string, string> {
   return {
@@ -32,34 +36,8 @@ function getCorsHeaders(): Record<string, string> {
   };
 }
 
-async function pathExists(p: string): Promise<boolean> {
-  try {
-    await fs.access(p);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
 async function collectArtifacts(dir: string): Promise<string[]> {
-  const results: string[] = [];
-  
-  try {
-    const entries = await fs.readdir(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        const subResults = await collectArtifacts(fullPath);
-        results.push(...subResults);
-      } else if (entry.isFile() && entry.name.endsWith('.bin')) {
-        results.push(fullPath);
-      }
-    }
-  } catch (e) {
-    logger.warn('Failed to collect artifacts', { dir, error: String(e) });
-  }
-  
-  return results;
+  return collectFiles(dir, BIN_EXTENSIONS);
 }
 
 async function detectEsp32Ports(): Promise<DetectedPortInfo[]> {

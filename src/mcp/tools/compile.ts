@@ -3,41 +3,25 @@
  * Arduino sketch compilation functionality
  */
 
-import * as fs from 'fs/promises';
 import * as path from 'path';
 import { z } from 'zod';
 import { compileSchema } from '../schemas.js';
 import { arduinoCliRunner } from '../../utils/cli-runner.js';
 import { workspaceConfigService } from '../../config/workspace.js';
 import { createLogger } from '../../utils/logger.js';
+import { 
+  ensureDirectory, 
+  resolveSketchPath,
+  collectFiles,
+  copyFile,
+  removeDirectory,
+} from '../../utils/fs.js';
 import type { CompileSummary, Diagnostic } from '../../types.js';
 
 const logger = createLogger('Compile');
 
 const DEFAULT_FQBN = process.env.ESP32_FQBN ?? 'esp32:esp32:esp32';
 const ARTIFACT_EXTENSIONS = new Set(['.bin', '.elf', '.map', '.hex']);
-
-async function pathExists(target: string): Promise<boolean> {
-  try {
-    await fs.access(target);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function ensureDirectory(dir: string): Promise<void> {
-  await fs.mkdir(dir, { recursive: true });
-}
-
-async function resolveSketchPath(sketchPath: string): Promise<string> {
-  const resolved = path.resolve(sketchPath);
-  const stat = await fs.stat(resolved);
-  if (stat.isDirectory()) {
-    return resolved;
-  }
-  return path.dirname(resolved);
-}
 
 function parseDiagnostics(output: string): Diagnostic[] {
   const lines = output.split('\n');
@@ -61,29 +45,7 @@ function parseDiagnostics(output: string): Diagnostic[] {
 }
 
 async function collectArtifacts(searchDir: string): Promise<string[]> {
-  const results: string[] = [];
-
-  async function walk(dir: string) {
-    try {
-      const entries = await fs.readdir(dir, { withFileTypes: true });
-      for (const entry of entries) {
-        const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
-          await walk(fullPath);
-        } else if (entry.isFile()) {
-          const ext = path.extname(entry.name).toLowerCase();
-          if (ARTIFACT_EXTENSIONS.has(ext)) {
-            results.push(fullPath);
-          }
-        }
-      }
-    } catch (e) {
-      logger.warn('Failed to walk directory', { dir, error: String(e) });
-    }
-  }
-
-  await walk(searchDir);
-  return results;
+  return collectFiles(searchDir, ARTIFACT_EXTENSIONS);
 }
 
 type CompileParams = z.infer<typeof compileSchema>;
@@ -95,9 +57,11 @@ export async function runCompile(args: CompileParams): Promise<CompileSummary> {
   const sketchPath = await resolveSketchPath(args.sketch_path);
   const buildPath = path.resolve(args.build_path ?? path.join(sketchPath, '.build'));
   
-  if (args.clean && (await pathExists(buildPath))) {
-    await fs.rm(buildPath, { recursive: true, force: true });
-    logger.info('Cleaned build directory', { buildPath });
+  if (args.clean) {
+    const removed = await removeDirectory(buildPath);
+    if (removed) {
+      logger.info('Cleaned build directory', { buildPath });
+    }
   }
   
   await ensureDirectory(buildPath);
@@ -127,11 +91,10 @@ export async function runCompile(args: CompileParams): Promise<CompileSummary> {
   if (result.exitCode === 0 && args.export_bin) {
     try {
       const config = workspaceConfigService.getSnapshot();
-      await ensureDirectory(config.buildOutputDir);
       for (const artifact of artifacts) {
         if (artifact.endsWith('.bin')) {
           const destPath = path.join(config.buildOutputDir, path.basename(artifact));
-          await fs.copyFile(artifact, destPath);
+          await copyFile(artifact, destPath);
           copiedToBuildDir.push(destPath);
         }
       }
