@@ -1,12 +1,11 @@
 /**
- * ESP32 network diagnostic sketch.
- * Connects to the provided AP, prints and posts network details to a Discord webhook.
- * Collects: IP info, RSSI, channel, BSSID, cipher, Wi‑Fi and BT MAC addresses.
+ * ESP32 network diagnostic sketch for aranea devices.
+ * Connects to the provided AP (main/alt/dev fallback), prints and posts network details to a Discord webhook.
+ * Generates unique LacisID from WiFi MAC and outputs ::RegisteredInfo:: for installation verification.
  * 
  * SETUP:
- *   1. Copy this file or rename credentials_example.h to credentials.h
- *   2. Fill in your Wi-Fi credentials and Discord webhook URL
- *   3. Compile and upload to your ESP32
+ *   1. Configure Discord webhook URL below
+ *   2. Compile and upload to your ESP32
  */
 
 #include <WiFi.h>
@@ -20,21 +19,34 @@
 #include "esp_system.h"
 
 // ============================================================
-// CONFIGURATION - Edit these values for your environment
+// CONFIGURATION - aranea Device Settings
 // ============================================================
 
-// Wi-Fi credentials for the AP under test.
-// Replace with your actual credentials before compiling.
-constexpr char kSsid[] = "YOUR_WIFI_SSID";
-constexpr char kPassword[] = "YOUR_WIFI_PASSWORD";
+// Wi-Fi credentials - tried in order: main -> alt -> dev
+// 3 rounds before 10 minute wait
+struct WifiCredential {
+  const char* ssid;
+  const char* password;
+  const char* label;
+};
+
+const WifiCredential kWifiCredentials[] = {
+  {"cluster1", "ISMS12345@", "main"},
+  {"ISMS_infrastructure", "isms12345@", "alt"},
+  {"fgop", "tetrad12345@@@", "dev"}
+};
+constexpr size_t kWifiCredentialCount = sizeof(kWifiCredentials) / sizeof(kWifiCredentials[0]);
+
+// aranea Device Registration Info
+constexpr char kCic[] = "000000";
+constexpr char kRegisterStatus[] = "Registered";
 
 // Discord webhook endpoint.
 // Create a webhook in Discord: Server Settings -> Integrations -> Webhooks
-// Replace with your actual webhook URL.
-constexpr char kWebhookUrl[] = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN";
-constexpr char kWebhookUrlWait[] = "https://discord.com/api/webhooks/YOUR_WEBHOOK_ID/YOUR_WEBHOOK_TOKEN?wait=true";
-constexpr char kWebhookId[] = "YOUR_WEBHOOK_ID";
-constexpr char kWebhookToken[] = "YOUR_WEBHOOK_TOKEN";
+constexpr char kWebhookUrl[] = "https://discord.com/api/webhooks/1446680031261622303/6oTaI_D2lBxNVpwFk_p5TfMkPi3SrVXE0l4U7TNWU9FbCNS7DqbG_yBC01ubDGxANlxn";
+constexpr char kWebhookUrlWait[] = "https://discord.com/api/webhooks/1446680031261622303/6oTaI_D2lBxNVpwFk_p5TfMkPi3SrVXE0l4U7TNWU9FbCNS7DqbG_yBC01ubDGxANlxn?wait=true";
+constexpr char kWebhookId[] = "1446680031261622303";
+constexpr char kWebhookToken[] = "6oTaI_D2lBxNVpwFk_p5TfMkPi3SrVXE0l4U7TNWU9FbCNS7DqbG_yBC01ubDGxANlxn";
 
 // Probe targets for reachability testing (customize for your network)
 struct ProbeTarget {
@@ -52,11 +64,13 @@ const ProbeTarget kTargets[] = {
 // TIMING CONFIGURATION
 // ============================================================
 
-// Try connecting for this many attempts before resetting Wi-Fi.
 constexpr uint8_t kMaxConnectAttempts = 20;
 constexpr unsigned long kReconnectDelayMs = 1000;
-constexpr unsigned long kPostIntervalMs = 600000;  // Post every 10 minutes.
-constexpr unsigned long kStatusPollMs = 5000;      // Serial print cadence.
+constexpr unsigned long kPostIntervalMs = 600000;          // Post to Discord every 10 minutes.
+constexpr unsigned long kRegisteredInfoIntervalMs = 300000; // Print RegisteredInfo every 5 minutes.
+constexpr unsigned long kStatusPollMs = 5000;              // Serial print cadence.
+constexpr unsigned long kWifiRetryWaitMs = 600000;         // 10 minutes wait after 3 rounds fail.
+constexpr uint8_t kWifiRounds = 3;                         // Try each SSID 3 rounds before long wait.
 
 // Ports to scan on probe targets
 const int kPortsToScan[] = {80, 443, 22, 53};
@@ -68,10 +82,14 @@ const int kPortsToScan[] = {80, 443, 22, 53};
 WiFiClientSecure secureClient;
 unsigned long lastPost = 0;
 unsigned long lastStatusPrint = 0;
+unsigned long lastRegisteredInfoPrint = 0;
 bool timeSynced = false;
 String gHostname;
+String gLacisId;  // 20-digit unique ID: 0000{MAC(12digit)}0000
 String lastScanSummary;
 String lastProbeSummary;
+int currentWifiIndex = 0;
+int wifiRoundCount = 0;
 
 // ============================================================
 // UTILITY FUNCTIONS
@@ -80,6 +98,21 @@ String lastProbeSummary;
 String macToString(const uint8_t *mac) {
   char buf[18];
   snprintf(buf, sizeof(buf), "%02X:%02X:%02X:%02X:%02X:%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+String macToHexString(const uint8_t *mac) {
+  char buf[13];
+  snprintf(buf, sizeof(buf), "%02X%02X%02X%02X%02X%02X",
+           mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  return String(buf);
+}
+
+String generateLacisId(const uint8_t *mac) {
+  // Format: 0000{MAC(12digit)}0000 = 20 digits total
+  char buf[21];
+  snprintf(buf, sizeof(buf), "0000%02X%02X%02X%02X%02X%02X0000",
            mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
   return String(buf);
 }
@@ -244,6 +277,34 @@ String buildEditUrl(const String &messageId) {
   return url;
 }
 
+// ============================================================
+// REGISTERED INFO OUTPUT
+// ============================================================
+
+String buildRegisteredInfoString() {
+  // Format: ::RegisteredInfo::["LacisID:xxx","RegisterStatus:xxx","cic:xxx","mainssid:xxx",...]
+  String info = "::RegisteredInfo::[";
+  info += "\"LacisID:" + gLacisId + "\",";
+  info += "\"RegisterStatus:" + String(kRegisterStatus) + "\",";
+  info += "\"cic:" + String(kCic) + "\",";
+  info += "\"mainssid:" + String(kWifiCredentials[0].ssid) + "\",";
+  info += "\"mainpass:" + String(kWifiCredentials[0].password) + "\",";
+  info += "\"altssid:" + String(kWifiCredentials[1].ssid) + "\",";
+  info += "\"altpass:" + String(kWifiCredentials[1].password) + "\",";
+  info += "\"devssid:" + String(kWifiCredentials[2].ssid) + "\",";
+  info += "\"devpass:" + String(kWifiCredentials[2].password) + "\"";
+  info += "]";
+  return info;
+}
+
+void printRegisteredInfo() {
+  Serial.println(buildRegisteredInfoString());
+}
+
+// ============================================================
+// NETWORK DIAGNOSTICS
+// ============================================================
+
 String buildScanSummary(const String &currentSsid, const uint8_t *currentBssid, uint32_t &scanTimeMs) {
   const unsigned long tScanStart = millis();
   int16_t n = WiFi.scanNetworks(/*async=*/false, /*show_hidden=*/true);
@@ -364,6 +425,7 @@ void printAndSendStatus(bool forceSend = false) {
     lastStatusPrint = now;
     Serial.println("---- Network Status ----");
     Serial.printf("Timestamp: %s\n", formatTimestamp().c_str());
+    Serial.printf("LacisID: %s\n", gLacisId.c_str());
     Serial.printf("Hostname: %s\n", hostname.c_str());
     Serial.printf("Status: %s\n", wifiStatusToString(WiFi.status()).c_str());
     Serial.printf("Mode: %s\n", wifiModeToString(WiFi.getMode()).c_str());
@@ -388,14 +450,22 @@ void printAndSendStatus(bool forceSend = false) {
     Serial.println("------------------------");
   }
 
+  // Print RegisteredInfo every 5 minutes
+  if (now - lastRegisteredInfoPrint >= kRegisteredInfoIntervalMs || forceSend) {
+    lastRegisteredInfoPrint = now;
+    printRegisteredInfo();
+  }
+
   if (!forceSend && (now - lastPost) < kPostIntervalMs) {
     return;
   }
   lastPost = now;
 
   String statusText;
-  statusText.reserve(512);
-  statusText += "[ESP32 Network Diagnostic]\n";
+  statusText.reserve(700);
+  statusText += "[ESP32 aranea Device Diagnostic]\n";
+  statusText += "LacisID: " + gLacisId + "\n";
+  statusText += "RegisterStatus: " + String(kRegisterStatus) + " | cic: " + String(kCic) + "\n";
   statusText += "Timestamp: " + formatTimestamp() + "\n";
   statusText += "Hostname: " + hostname + "\n";
   statusText += "Status: " + wifiStatusToString(WiFi.status()) + " / Mode: " + wifiModeToString(WiFi.getMode()) + "\n";
@@ -408,7 +478,9 @@ void printAndSendStatus(bool forceSend = false) {
   statusText += "DNS: " + dns.toString() + " / " + dns1.toString() + "\n";
   statusText += "Broadcast: " + bcast.toString() + "\n";
   statusText += "MAC STA / BT: " + macToString(macSta) + " / " + macToString(macBt) + "\n";
-  statusText += "Free heap: " + String(ESP.getFreeHeap()) + " / Uptime ms: " + String(now) + "\n\n";
+  statusText += "Free heap: " + String(ESP.getFreeHeap()) + " / Uptime ms: " + String(now) + "\n";
+  statusText += "---\n";
+  statusText += buildRegisteredInfoString() + "\n\n";
   statusText += lastScanSummary + "\n";
   statusText += lastProbeSummary + "\n";
 
@@ -425,7 +497,7 @@ void printAndSendStatus(bool forceSend = false) {
   String combinedPlaceholder = statusText + "\\n" + timingTextPlaceholder;
 
   String payload = "{";
-  payload += "\"username\":\"ESP32 Network Diagnostic\",";
+  payload += "\"username\":\"ESP32 aranea Device\",";
   payload += "\"content\":\"" + jsonEscape(combinedPlaceholder) + "\",";
   payload += "\"allowed_mentions\":{\"parse\":[]}";
   payload += "}";
@@ -460,7 +532,7 @@ void printAndSendStatus(bool forceSend = false) {
 
     String combinedFinal = statusText + "\\n" + timingTextFinal;
     String finalPayload = "{";
-    finalPayload += "\"username\":\"ESP32 Network Diagnostic\",";
+    finalPayload += "\"username\":\"ESP32 aranea Device\",";
     finalPayload += "\"content\":\"" + jsonEscape(combinedFinal) + "\",";
     finalPayload += "\"allowed_mentions\":{\"parse\":[]}";
     finalPayload += "}";
@@ -488,52 +560,95 @@ void printAndSendStatus(bool forceSend = false) {
   }
 }
 
+// ============================================================
+// WIFI CONNECTION WITH FALLBACK
+// ============================================================
+
+bool tryConnectWifi(const WifiCredential& cred) {
+  Serial.printf("Trying SSID [%s]: %s\n", cred.label, cred.ssid);
+  
+  WiFi.disconnect(true);
+  delay(200);
+  WiFi.begin(cred.ssid, cred.password);
+  
+  uint8_t attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < kMaxConnectAttempts) {
+    attempts++;
+    Serial.printf("  Attempt %u/%u; status=%d\n", attempts, kMaxConnectAttempts, WiFi.status());
+    delay(kReconnectDelayMs);
+  }
+  
+  return WiFi.status() == WL_CONNECTED;
+}
+
 void connectWifi() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect(true);
   delay(200);
 
+  // Generate LacisID from MAC
   uint8_t macSta[6];
   esp_efuse_mac_get_default(macSta);
+  gLacisId = generateLacisId(macSta);
   gHostname = makeHostName(macSta);
   WiFi.setHostname(gHostname.c_str());
-
-  Serial.printf("Connecting to SSID: %s\n", kSsid);
-  WiFi.begin(kSsid, kPassword);
-
-  uint8_t attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < kMaxConnectAttempts) {
-    attempts++;
-    Serial.printf("Attempt %u/%u; status=%d\n", attempts, kMaxConnectAttempts, WiFi.status());
-    delay(kReconnectDelayMs);
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("WiFi connected.");
-    // Set NetBIOS/MDNS for discoverability.
-    if (!MDNS.begin(gHostname.c_str())) {
-      Serial.println("mDNS start failed");
-    } else {
-      MDNS.addService("http", "tcp", 80);
+  
+  Serial.println("========================================");
+  Serial.println("ESP32 aranea Device starting...");
+  Serial.printf("LacisID: %s\n", gLacisId.c_str());
+  Serial.printf("Hostname: %s\n", gHostname.c_str());
+  Serial.println("========================================");
+  
+  // Print RegisteredInfo at startup
+  printRegisteredInfo();
+  
+  // Try connecting with fallback: main -> alt -> dev, 3 rounds
+  bool connected = false;
+  
+  for (int round = 0; round < kWifiRounds && !connected; round++) {
+    Serial.printf("\n--- WiFi Connection Round %d/%d ---\n", round + 1, kWifiRounds);
+    
+    for (size_t i = 0; i < kWifiCredentialCount && !connected; i++) {
+      connected = tryConnectWifi(kWifiCredentials[i]);
+      if (connected) {
+        currentWifiIndex = i;
+        Serial.printf("WiFi connected via [%s]!\n", kWifiCredentials[i].label);
+        break;
+      }
     }
-    NBNS.begin(gHostname.c_str());
-
-    // NTP sync once per connect.
-    timeSynced = syncTimeWithNtp();
-
-    printAndSendStatus(true);
-  } else {
-    Serial.println("WiFi connection failed, restarting Wi-Fi.");
-    WiFi.disconnect(true);
-    delay(500);
   }
+  
+  if (!connected) {
+    Serial.println("All WiFi attempts failed. Waiting 10 minutes before retry...");
+    // Print RegisteredInfo even on failure
+    printRegisteredInfo();
+    delay(kWifiRetryWaitMs);
+    return;
+  }
+
+  // Successfully connected
+  if (!MDNS.begin(gHostname.c_str())) {
+    Serial.println("mDNS start failed");
+  } else {
+    MDNS.addService("http", "tcp", 80);
+  }
+  NBNS.begin(gHostname.c_str());
+
+  // NTP sync once per connect.
+  timeSynced = syncTimeWithNtp();
+
+  // Print RegisteredInfo and send status
+  printRegisteredInfo();
+  printAndSendStatus(true);
 }
+
+// ============================================================
+// SETUP AND LOOP
+// ============================================================
 
 void setup() {
   Serial.begin(115200);
   delay(500);
-  Serial.println("ESP32 Network Diagnostic starting...");
-  Serial.println("Make sure to configure kSsid, kPassword, and kWebhookUrl before use.");
   connectWifi();
 }
 

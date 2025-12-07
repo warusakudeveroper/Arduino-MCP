@@ -48,7 +48,8 @@ function resolvePythonExecutable(): string {
   if (fsSync.existsSync(VENV_PYTHON)) {
     return VENV_PYTHON;
   }
-  return 'python3';
+  // Windows uses 'python', macOS/Linux use 'python3'
+  return process.platform === 'win32' ? 'python' : 'python3';
 }
 
 let ARDUINO_CLI = resolveArduinoCliExecutable();

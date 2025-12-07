@@ -187,10 +187,26 @@ export class InstallLogService {
   }
 
   /**
-   * Add a new install log entry
+   * Add a new install log entry (with duplicate check by lacisID)
    */
-  async addEntry(port: string, entry: Partial<InstallLogEntry>): Promise<string> {
+  async addEntry(port: string, entry: Partial<InstallLogEntry>): Promise<string | null> {
     await this.load();
+    
+    // Check for duplicate lacisID
+    if (entry.lacisID) {
+      const existingEntry = Object.entries(this.logs).find(
+        ([_, e]) => e.lacisID === entry.lacisID
+      );
+      if (existingEntry) {
+        logger.info('Duplicate lacisID detected, skipping registration', { 
+          lacisID: entry.lacisID, 
+          existingKey: existingEntry[0],
+          port 
+        });
+        return null; // Return null to indicate duplicate
+      }
+    }
+    
     const now = new Date();
     const timestamp = now.toISOString().replace(/[-:T]/g, '').slice(0, 14);
     const portId = port.replace(/[^a-zA-Z0-9]/g, '_');
@@ -212,7 +228,7 @@ export class InstallLogService {
     };
 
     await this.save();
-    logger.info('Install log entry added', { key, port });
+    logger.info('Install log entry added', { key, port, lacisID: entry.lacisID });
     return key;
   }
 

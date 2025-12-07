@@ -6,6 +6,7 @@
 import * as http from 'http';
 // fsSync no longer needed - detectPorts handles file existence check
 import * as path from 'path';
+import { execa } from 'execa';
 import { serialBroadcaster } from '../serial/broadcaster.js';
 import { monitorManager } from '../serial/monitor.js';
 import { 
@@ -15,10 +16,11 @@ import {
 } from '../config/workspace.js';
 import { arduinoCliRunner } from '../utils/cli-runner.js';
 import { createLogger } from '../utils/logger.js';
-import { pathExists, collectFiles } from '../utils/fs.js';
+import { pathExists, collectFiles, ensureDirectory } from '../utils/fs.js';
 import { DetectedPortInfo } from '../types.js';
 import { getConsoleHtml } from './html.js';
 import * as fs from 'fs/promises';
+import * as os from 'os';
 
 const logger = createLogger('ConsoleServer');
 
@@ -194,8 +196,14 @@ export class ConsoleServer {
           const body = await this.readBody(req);
           const { port, entry } = JSON.parse(body);
           const key = await installLogService.addEntry(port, entry);
-          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
-          res.end(JSON.stringify({ ok: true, key }));
+          if (key === null) {
+            // Duplicate lacisID
+            res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+            res.end(JSON.stringify({ ok: true, duplicate: true, lacisID: entry.lacisID }));
+          } else {
+            res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+            res.end(JSON.stringify({ ok: true, key }));
+          }
         } catch (error) {
           res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
           res.end(JSON.stringify({ ok: false, error: String(error) }));
@@ -316,6 +324,59 @@ export class ConsoleServer {
       return;
     }
 
+    // API: Poll port (for polling mode - quick read and close)
+    if (req.url.startsWith('/api/poll-port') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, baud = 115200, timeout = 80 } = JSON.parse(body);
+        
+        // Quick poll using Python
+        const { pythonRunner } = await import('../utils/cli-runner.js');
+        const pythonPath = pythonRunner.getPath();
+        const { execa } = await import('execa');
+        
+        const script = `
+import serial
+import sys
+import time
+
+port = sys.argv[1]
+baud = int(sys.argv[2])
+timeout_ms = int(sys.argv[3])
+
+try:
+    ser = serial.Serial(port, baud, timeout=timeout_ms/1000)
+    lines = []
+    end_time = time.time() + timeout_ms/1000
+    while time.time() < end_time:
+        if ser.in_waiting:
+            line = ser.readline()
+            if line:
+                lines.append(line.decode('utf-8', errors='replace').rstrip())
+    ser.close()
+    for line in lines:
+        print(line)
+except Exception as e:
+    print(f"ERROR:{e}", file=sys.stderr)
+    sys.exit(1)
+`;
+        
+        const result = await execa(pythonPath, ['-c', script, port, String(baud), String(timeout)], {
+          timeout: timeout + 1000,
+          reject: false,
+        });
+        
+        const lines = result.stdout ? result.stdout.split('\n').filter(l => l.length > 0) : [];
+        
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, lines, port }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error), lines: [] }));
+      }
+      return;
+    }
+
     // API: Artifacts
     if (req.url.startsWith('/api/artifacts')) {
       try {
@@ -348,6 +409,257 @@ export class ConsoleServer {
 
         res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: true, artifacts, searchDirs }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Compile sketch
+    if (req.url === '/api/compile' && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { sketch_path, fqbn = 'esp32:esp32:esp32' } = JSON.parse(body);
+        
+        if (!sketch_path) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'sketch_path is required' }));
+          return;
+        }
+
+        // Handle paths with special characters by copying to temp directory
+        const tempBuildDir = path.join(os.tmpdir(), 'arduino_mcp_build');
+        const sketchName = path.basename(sketch_path).replace('.ino', '');
+        const tempSketchDir = path.join(tempBuildDir, sketchName);
+        const buildOutputDir = path.join(tempBuildDir, 'output');
+        
+        await ensureDirectory(tempSketchDir);
+        await ensureDirectory(buildOutputDir);
+        
+        // Copy sketch files to temp directory
+        const sketchDir = path.dirname(sketch_path);
+        const files = await fs.readdir(sketchDir);
+        for (const file of files) {
+          const srcPath = path.join(sketchDir, file);
+          const destPath = path.join(tempSketchDir, file === path.basename(sketch_path) ? `${sketchName}.ino` : file);
+          const stat = await fs.stat(srcPath);
+          if (stat.isFile()) {
+            await fs.copyFile(srcPath, destPath);
+          }
+        }
+        
+        logger.info('Compiling sketch', { sketch_path, tempSketchDir, fqbn });
+        
+        const result = await execa(arduinoCliRunner.getPath(), [
+          'compile',
+          '--fqbn', fqbn,
+          '--output-dir', buildOutputDir,
+          tempSketchDir
+        ], { reject: false });
+        
+        const ok = result.exitCode === 0;
+        
+        res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({
+          ok,
+          sketch_path,
+          build_path: buildOutputDir,
+          fqbn,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Upload to port
+    if (req.url === '/api/upload' && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, build_path, fqbn = 'esp32:esp32:esp32' } = JSON.parse(body);
+        
+        if (!port || !build_path) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'port and build_path are required' }));
+          return;
+        }
+
+        logger.info('Uploading to port', { port, build_path, fqbn });
+        
+        const result = await execa(arduinoCliRunner.getPath(), [
+          'upload',
+          '--fqbn', fqbn,
+          '--port', port,
+          '--input-dir', build_path
+        ], { reject: false });
+        
+        const ok = result.exitCode === 0;
+        
+        res.writeHead(ok ? 200 : 500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({
+          ok,
+          port,
+          build_path,
+          fqbn,
+          stdout: result.stdout,
+          stderr: result.stderr,
+          exitCode: result.exitCode,
+        }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Flash all connected ESP32s
+    if (req.url === '/api/flash-all' && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { sketch_path, fqbn = 'esp32:esp32:esp32' } = JSON.parse(body);
+        
+        if (!sketch_path) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'sketch_path is required' }));
+          return;
+        }
+
+        // First compile
+        const tempBuildDir = path.join(os.tmpdir(), 'arduino_mcp_build');
+        const sketchName = path.basename(sketch_path).replace('.ino', '');
+        const tempSketchDir = path.join(tempBuildDir, sketchName);
+        const buildOutputDir = path.join(tempBuildDir, 'output');
+        
+        await ensureDirectory(tempSketchDir);
+        await ensureDirectory(buildOutputDir);
+        
+        // Copy sketch files
+        const sketchDir = path.dirname(sketch_path);
+        const files = await fs.readdir(sketchDir);
+        for (const file of files) {
+          const srcPath = path.join(sketchDir, file);
+          const destPath = path.join(tempSketchDir, file === path.basename(sketch_path) ? `${sketchName}.ino` : file);
+          const stat = await fs.stat(srcPath);
+          if (stat.isFile()) {
+            await fs.copyFile(srcPath, destPath);
+          }
+        }
+        
+        logger.info('Compiling for flash-all', { sketch_path, tempSketchDir, fqbn });
+        
+        const compileResult = await execa(arduinoCliRunner.getPath(), [
+          'compile',
+          '--fqbn', fqbn,
+          '--output-dir', buildOutputDir,
+          tempSketchDir
+        ], { reject: false });
+        
+        if (compileResult.exitCode !== 0) {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({
+            ok: false,
+            stage: 'compile',
+            error: 'Compilation failed',
+            stdout: compileResult.stdout,
+            stderr: compileResult.stderr,
+          }));
+          return;
+        }
+        
+        // Get ESP32 ports
+        const ports = await detectEsp32Ports();
+        const esp32Ports = ports.filter(p => p.isEsp32);
+        
+        logger.info('Flash-all: Starting sequential upload', { 
+          totalPorts: esp32Ports.length,
+          ports: esp32Ports.map(p => p.port)
+        });
+        
+        // Upload to each port SEQUENTIALLY with delays and timeout
+        const results: Array<{ port: string; ok: boolean; error?: string; duration?: number }> = [];
+        const UPLOAD_TIMEOUT_MS = 120000; // 2 minutes per upload
+        const INTER_UPLOAD_DELAY_MS = 2000; // 2 seconds between uploads
+        
+        for (let i = 0; i < esp32Ports.length; i++) {
+          const portInfo = esp32Ports[i];
+          const portName = portInfo.port.split('/').pop() || portInfo.port;
+          
+          logger.info(`Flash-all: [${i + 1}/${esp32Ports.length}] Uploading to ${portName}...`);
+          const startTime = Date.now();
+          
+          try {
+            const uploadResult = await execa(arduinoCliRunner.getPath(), [
+              'upload',
+              '--fqbn', fqbn,
+              '--port', portInfo.port,
+              '--input-dir', buildOutputDir
+            ], { 
+              reject: false,
+              timeout: UPLOAD_TIMEOUT_MS,
+            });
+            
+            const duration = Date.now() - startTime;
+            const ok = uploadResult.exitCode === 0;
+            
+            results.push({
+              port: portInfo.port,
+              ok,
+              error: ok ? undefined : (uploadResult.stderr || 'Upload failed'),
+              duration,
+            });
+            
+            logger.info(`Flash-all: [${i + 1}/${esp32Ports.length}] ${portName} - ${ok ? '✓ OK' : '✗ FAILED'} (${duration}ms)`);
+            
+          } catch (e: unknown) {
+            const duration = Date.now() - startTime;
+            const errorMsg = e instanceof Error ? e.message : String(e);
+            const isTimeout = errorMsg.includes('timed out');
+            
+            results.push({
+              port: portInfo.port,
+              ok: false,
+              error: isTimeout ? `Timeout after ${UPLOAD_TIMEOUT_MS}ms` : errorMsg,
+              duration,
+            });
+            
+            logger.error(`Flash-all: [${i + 1}/${esp32Ports.length}] ${portName} - ✗ ERROR: ${errorMsg}`);
+          }
+          
+          // Wait between uploads to allow port to stabilize
+          if (i < esp32Ports.length - 1) {
+            logger.info(`Flash-all: Waiting ${INTER_UPLOAD_DELAY_MS}ms before next upload...`);
+            await new Promise(resolve => setTimeout(resolve, INTER_UPLOAD_DELAY_MS));
+          }
+        }
+        
+        const successCount = results.filter(r => r.ok).length;
+        const failedCount = results.length - successCount;
+        const allOk = results.length > 0 && successCount === results.length;
+        const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+        
+        logger.info('Flash-all: Complete', {
+          total: results.length,
+          success: successCount,
+          failed: failedCount,
+          totalDuration: `${(totalDuration / 1000).toFixed(1)}s`,
+        });
+        
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({
+          ok: allOk,
+          stage: 'flash-all',
+          total: results.length,
+          success: successCount,
+          failed: failedCount,
+          totalDuration,
+          results,
+          build_path: buildOutputDir,
+        }));
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: false, error: String(error) }));

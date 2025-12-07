@@ -22,9 +22,23 @@ const REBOOT_PATTERNS = [
   /CPU halted/i,
 ];
 
-// Python script for serial monitoring
+// Python script for serial monitoring (cross-platform, with timeout and signal handling)
 const MONITOR_SCRIPT = `
-import sys, serial, time, json
+import sys, signal, time
+
+# Handle termination gracefully
+running = True
+def signal_handler(sig, frame):
+    global running
+    running = False
+signal.signal(signal.SIGTERM, signal_handler)
+signal.signal(signal.SIGINT, signal_handler)
+
+try:
+    import serial
+except ImportError:
+    print("ERROR: pyserial not installed", file=sys.stderr)
+    sys.exit(1)
 
 port = sys.argv[1]
 baud = int(sys.argv[2])
@@ -32,7 +46,8 @@ auto_baud = sys.argv[3] == 'true'
 
 ser = None
 try:
-    ser = serial.Serial(port, baud, timeout=0.1)
+    # Open with short timeout to avoid blocking forever
+    ser = serial.Serial(port, baud, timeout=0.5)
     ser.dtr = False
     ser.rts = False
     time.sleep(0.1)
@@ -44,24 +59,45 @@ try:
     time.sleep(0.1)
     
     boot_lines = 0
-    while True:
+    last_data_time = time.time()
+    IDLE_TIMEOUT = 300  # 5 minutes without data = exit
+    
+    while running:
         try:
-            line = ser.readline()
-            if line:
-                text = line.decode('utf-8', errors='replace').rstrip()
-                print(text, flush=True)
-                boot_lines += 1
-                if auto_baud and boot_lines > 5 and baud == 74880:
-                    ser.baudrate = 115200
-                    auto_baud = False
+            if ser.in_waiting > 0:
+                line = ser.readline()
+                if line:
+                    text = line.decode('utf-8', errors='replace').rstrip()
+                    print(text, flush=True)
+                    boot_lines += 1
+                    last_data_time = time.time()
+                    if auto_baud and boot_lines > 5 and baud == 74880:
+                        ser.baudrate = 115200
+                        auto_baud = False
+            else:
+                time.sleep(0.05)
+                # Check for idle timeout
+                if time.time() - last_data_time > IDLE_TIMEOUT:
+                    print("IDLE_TIMEOUT", file=sys.stderr)
+                    break
         except serial.SerialException as e:
             print(f"Serial error: {e}", file=sys.stderr)
             break
-        except KeyboardInterrupt:
+        except Exception as e:
+            print(f"Error: {e}", file=sys.stderr)
             break
+except serial.SerialException as e:
+    print(f"Failed to open port: {e}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"Startup error: {e}", file=sys.stderr)
+    sys.exit(1)
 finally:
-    if ser:
-        ser.close()
+    if ser and ser.is_open:
+        try:
+            ser.close()
+        except:
+            pass
 `;
 
 /**
@@ -132,12 +168,21 @@ export class MonitorSession {
         if (registeredInfo) {
           installLogService.addEntry(this.options.port, registeredInfo)
             .then(key => {
-              serialBroadcaster.broadcast({
-                type: 'install_log',
-                port: this.options.port,
-                key,
-                entry: registeredInfo,
-              });
+              if (key) {
+                // New entry added
+                serialBroadcaster.broadcast({
+                  type: 'install_log',
+                  port: this.options.port,
+                  key,
+                  entry: registeredInfo,
+                });
+              } else {
+                // Duplicate lacisID, skip broadcast
+                logger.info('Skipping duplicate RegisteredInfo broadcast', { 
+                  port: this.options.port, 
+                  lacisID: registeredInfo.lacisID 
+                });
+              }
             })
             .catch(e => logger.error('Failed to save install log', { error: String(e) }));
         }
@@ -284,6 +329,7 @@ export class MonitorManager {
 
   /**
    * Start a new monitor session
+   * If a session already exists for the same port, it will be stopped first
    */
   async start(options: {
     port: string;
@@ -295,6 +341,19 @@ export class MonitorManager {
     stop_on?: string;
     detect_reboot?: boolean;
   }): Promise<MonitorSession> {
+    // Stop any existing session on the same port (single session per port policy)
+    const existingSession = this.getByPort(options.port);
+    if (existingSession) {
+      logger.info('Stopping existing session for port', { port: options.port });
+      await existingSession.stop();
+      // Remove from sessions map
+      for (const [token, session] of this.sessions.entries()) {
+        if (session.port === options.port) {
+          this.sessions.delete(token);
+        }
+      }
+    }
+
     const token = randomUUID();
     
     let stopRegex: RegExp | undefined;
@@ -344,6 +403,13 @@ export class MonitorManager {
     if (!port) {
       return undefined;
     }
+    return this.getByPort(port);
+  }
+
+  /**
+   * Get session by port
+   */
+  getByPort(port: string): MonitorSession | undefined {
     for (const session of this.sessions.values()) {
       if (session.port === port) {
         return session;
