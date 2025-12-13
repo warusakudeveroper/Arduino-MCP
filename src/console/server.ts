@@ -9,6 +9,9 @@ import * as path from 'path';
 import { execa } from 'execa';
 import { serialBroadcaster } from '../serial/broadcaster.js';
 import { monitorManager } from '../serial/monitor.js';
+import { portBufferManager } from '../serial/port-buffer.js';
+import { portStateManager } from '../serial/port-state.js';
+import { deviceHealthMonitor } from '../serial/device-health.js';
 import { 
   workspaceConfigService, 
   installLogService,
@@ -243,6 +246,62 @@ export class ConsoleServer {
       return;
     }
 
+    // API: Port states - get all port states
+    if (req.url.startsWith('/api/port-states') && req.method === 'GET') {
+      try {
+        const summary = portStateManager.getSummary();
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, ...summary }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Device health - get health status for all ports or specific port
+    if (req.url.startsWith('/api/device-health') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const port = url.searchParams.get('port');
+
+        if (port) {
+          const report = deviceHealthMonitor.getAIReport(port);
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, port, ...report }));
+        } else {
+          const allHealth = deviceHealthMonitor.getAllHealthStatus();
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, devices: allHealth }));
+        }
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Clear device health data
+    if (req.url.startsWith('/api/device-health/clear') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port } = JSON.parse(body);
+
+        if (port) {
+          deviceHealthMonitor.clearPort(port);
+        } else {
+          deviceHealthMonitor.clearAll();
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
     // API: Get ports
     if (req.url.startsWith('/api/ports')) {
       try {
@@ -317,10 +376,193 @@ export class ConsoleServer {
       return;
     }
 
-    // API: Get logs
+    // API: Get logs (legacy - from broadcaster)
     if (req.url.startsWith('/api/logs') && req.method === 'GET') {
       res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
       res.end(JSON.stringify({ ok: true, logs: serialBroadcaster.getBuffer() }));
+      return;
+    }
+
+    // API: Buffer stats - get stats for all ports or specific port
+    if (req.url.startsWith('/api/buffer-stats') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const port = url.searchParams.get('port');
+
+        if (port) {
+          const stats = portBufferManager.getPortStats(port);
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, stats: stats ? [stats] : [] }));
+        } else {
+          const stats = portBufferManager.getStats();
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, stats, ports: portBufferManager.getPorts() }));
+        }
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Clear buffer for a port
+    if (req.url.startsWith('/api/buffer/clear') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port } = JSON.parse(body);
+
+        if (port) {
+          portBufferManager.clearBuffer(port);
+        } else {
+          portBufferManager.clearAllBuffers();
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Port buffer - get buffered lines for a port (use ?port= query param)
+    if (req.url.startsWith('/api/buffer') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const port = url.searchParams.get('port');
+
+        if (!port) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'port query parameter is required' }));
+          return;
+        }
+
+        const count = parseInt(url.searchParams.get('count') || '100');
+        const since = parseInt(url.searchParams.get('since') || '0');
+        const search = url.searchParams.get('search');
+
+        let lines;
+        if (search) {
+          lines = portBufferManager.searchBuffer(port, search);
+        } else if (since > 0) {
+          lines = portBufferManager.getLinesSince(port, since);
+        } else {
+          lines = portBufferManager.getRecentLines(port, count);
+        }
+
+        const stats = portBufferManager.getPortStats(port);
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, port, lines, stats }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Start capture - wait for pattern match
+    if (req.url.startsWith('/api/capture/start') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, pattern, timeout_ms = 30000, max_lines = 0 } = JSON.parse(body);
+
+        if (!port || !pattern) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'port and pattern are required' }));
+          return;
+        }
+
+        const { captureId, promise } = portBufferManager.startCapture({
+          port,
+          pattern,
+          timeoutMs: timeout_ms,
+          maxLines: max_lines,
+        });
+
+        // Return capture ID immediately, client can poll or wait
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, captureId, port, pattern }));
+
+        // Log when capture completes
+        promise.then(result => {
+          logger.info('Capture completed', { captureId, reason: result.reason });
+        });
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Wait for capture result (blocking)
+    if (req.url.startsWith('/api/capture/wait') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, pattern, timeout_ms = 30000, max_lines = 0 } = JSON.parse(body);
+
+        if (!port || !pattern) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'port and pattern are required' }));
+          return;
+        }
+
+        const { captureId, promise } = portBufferManager.startCapture({
+          port,
+          pattern,
+          timeoutMs: timeout_ms,
+          maxLines: max_lines,
+        });
+
+        // Wait for result
+        const result = await promise;
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: result.success, captureId, ...result }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Cancel capture
+    if (req.url.startsWith('/api/capture/cancel') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { captureId } = JSON.parse(body);
+
+        if (!captureId) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'captureId is required' }));
+          return;
+        }
+
+        const cancelled = portBufferManager.cancelCapture(captureId);
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: cancelled, captureId }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: List active captures
+    if (req.url.startsWith('/api/captures') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const port = url.searchParams.get('port') || undefined;
+        const captures = portBufferManager.getActiveCaptures(port);
+
+        res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: true, captures }));
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
       return;
     }
 
@@ -513,6 +755,272 @@ except Exception as e:
       } catch (error) {
         res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
         res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: Reset ESP32 device via DTR/RTS
+    if (req.url === '/api/reset-device' && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { port, method = 'dtr_rts', delay_ms = 100 } = JSON.parse(body);
+
+        if (!port) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'port is required' }));
+          return;
+        }
+
+        // Check if port is being monitored
+        const portState = portStateManager.getState(port);
+        let wasMonitoring = false;
+        if (portState.state === 'monitoring') {
+          wasMonitoring = true;
+          const session = monitorManager.getByPort(port);
+          if (session) {
+            await session.stop();
+            await new Promise(resolve => setTimeout(resolve, 200));
+          }
+        }
+
+        const { pythonRunner } = await import('../utils/cli-runner.js');
+        const pythonPath = pythonRunner.getPath();
+
+        if (method === 'esptool') {
+          // Use esptool for reset
+          const result = await execa(pythonPath, [
+            '-m', 'esptool',
+            '--chip', 'esp32',
+            '--port', port,
+            '--before', 'default_reset',
+            '--after', 'hard_reset',
+            'chip_id',
+          ], { reject: false, timeout: 15000 });
+
+          if (result.exitCode === 0) {
+            res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+            res.end(JSON.stringify({ ok: true, port, method: 'esptool', wasMonitoring }));
+          } else {
+            res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+            res.end(JSON.stringify({ ok: false, port, method: 'esptool', error: result.stderr }));
+          }
+          return;
+        }
+
+        // Default: DTR/RTS reset
+        const resetScript = `
+import sys
+import time
+import serial
+
+port = sys.argv[1]
+delay_s = float(sys.argv[2]) / 1000.0
+
+try:
+    ser = serial.Serial(port, 115200, timeout=0.5)
+    ser.dtr = False
+    ser.rts = True
+    time.sleep(delay_s)
+    ser.dtr = True
+    ser.rts = False
+    time.sleep(0.05)
+    ser.dtr = False
+    ser.close()
+    print("OK")
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+
+        const result = await execa(pythonPath, ['-c', resetScript, port, String(delay_ms)], {
+          reject: false,
+          timeout: 5000,
+        });
+
+        if (result.exitCode === 0) {
+          logger.info('Device reset via DTR/RTS', { port });
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, port, method: 'dtr_rts', delay_ms, wasMonitoring }));
+        } else {
+          res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, port, method: 'dtr_rts', error: result.stderr }));
+        }
+      } catch (error) {
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: String(error) }));
+      }
+      return;
+    }
+
+    // API: SPIFFS file explorer - proxy to ESP32 device
+    // These endpoints forward requests to ESP32 devices running firmware with SPIFFS API
+
+    // SPIFFS list files
+    if (req.url.startsWith('/api/spiffs/list') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const deviceIp = url.searchParams.get('device_ip');
+        const filePath = url.searchParams.get('path') || '/';
+
+        if (!deviceIp) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'device_ip is required' }));
+          return;
+        }
+
+        const response = await fetch(`http://${deviceIp}/api/spiffs/list?path=${encodeURIComponent(filePath)}`, {
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // Handle both 'ok' and 'success' response formats from ESP32
+          const isSuccess = data.ok === true || data.success === true;
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: isSuccess, files: data.files || [], path: filePath }));
+        } else {
+          res.writeHead(response.status, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: `Device returned ${response.status}` }));
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: msg.includes('aborted') ? 'Device timeout' : msg }));
+      }
+      return;
+    }
+
+    // SPIFFS read file
+    if (req.url.startsWith('/api/spiffs/read') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const deviceIp = url.searchParams.get('device_ip');
+        const filePath = url.searchParams.get('path');
+
+        if (!deviceIp || !filePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'device_ip and path are required' }));
+          return;
+        }
+
+        const response = await fetch(`http://${deviceIp}/api/spiffs/read?path=${encodeURIComponent(filePath)}`, {
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          // Handle both 'ok' and 'success' response formats from ESP32
+          // ESP32 returns { success: true, content: "..." }
+          const isSuccess = data.ok === true || data.success === true;
+          const content = data.content || '';
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: isSuccess, content, path: filePath }));
+        } else {
+          res.writeHead(response.status, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: `Device returned ${response.status}` }));
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: msg.includes('aborted') ? 'Device timeout' : msg }));
+      }
+      return;
+    }
+
+    // SPIFFS write file
+    if (req.url.startsWith('/api/spiffs/write') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { device_ip, path: filePath, content } = JSON.parse(body);
+
+        if (!device_ip || !filePath || content === undefined) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'device_ip, path, and content are required' }));
+          return;
+        }
+
+        const response = await fetch(`http://${device_ip}/api/spiffs/write?path=${encodeURIComponent(filePath)}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'text/plain' },
+          body: content,
+          signal: AbortSignal.timeout(15000),
+        });
+
+        if (response.ok) {
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, path: filePath, written: content.length }));
+        } else {
+          res.writeHead(response.status, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: `Device returned ${response.status}` }));
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: msg.includes('aborted') ? 'Device timeout' : msg }));
+      }
+      return;
+    }
+
+    // SPIFFS delete file
+    if (req.url.startsWith('/api/spiffs/delete') && req.method === 'POST') {
+      try {
+        const body = await this.readBody(req);
+        const { device_ip, path: filePath } = JSON.parse(body);
+
+        if (!device_ip || !filePath) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'device_ip and path are required' }));
+          return;
+        }
+
+        const response = await fetch(`http://${device_ip}/api/spiffs/delete?path=${encodeURIComponent(filePath)}`, {
+          method: 'DELETE',
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (response.ok) {
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, path: filePath }));
+        } else {
+          res.writeHead(response.status, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: `Device returned ${response.status}` }));
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: msg.includes('aborted') ? 'Device timeout' : msg }));
+      }
+      return;
+    }
+
+    // SPIFFS storage info
+    if (req.url.startsWith('/api/spiffs/info') && req.method === 'GET') {
+      try {
+        const url = new URL(req.url, `http://${req.headers.host}`);
+        const deviceIp = url.searchParams.get('device_ip');
+
+        if (!deviceIp) {
+          res.writeHead(400, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: 'device_ip is required' }));
+          return;
+        }
+
+        const response = await fetch(`http://${deviceIp}/api/spiffs/info`, {
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (response.ok) {
+          const data = await response.json();
+          res.writeHead(200, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: true, ...data }));
+        } else {
+          res.writeHead(response.status, { 'Content-Type': 'application/json', ...corsHeaders });
+          res.end(JSON.stringify({ ok: false, error: `Device returned ${response.status}` }));
+        }
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        res.writeHead(500, { 'Content-Type': 'application/json', ...corsHeaders });
+        res.end(JSON.stringify({ ok: false, error: msg.includes('aborted') ? 'Device timeout' : msg }));
       }
       return;
     }

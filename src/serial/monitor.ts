@@ -7,6 +7,9 @@ import { execa, ExecaChildProcess } from 'execa';
 import { randomUUID } from 'crypto';
 import { MonitorOptions, MonitorSummary } from '../types.js';
 import { serialBroadcaster } from './broadcaster.js';
+import { portBufferManager } from './port-buffer.js';
+import { portStateManager } from './port-state.js';
+import { deviceHealthMonitor } from './device-health.js';
 import { pythonRunner } from '../utils/cli-runner.js';
 import { installLogService } from '../config/workspace.js';
 import { createLogger } from '../utils/logger.js';
@@ -153,14 +156,42 @@ export class MonitorSession {
     child.stdout?.on('data', (chunk: Buffer) => {
       const text = chunk.toString('utf8');
       const lines = text.split('\n').filter(l => l.length > 0);
-      
+
       for (const line of lines) {
         this.lines += 1;
         this.lastLine = line;
 
-        // Check for reboot patterns
-        if (this.options.detectReboot && REBOOT_PATTERNS.some(p => p.test(line))) {
+        // Add to port buffer for later retrieval and condition capture
+        const bufferedLine = portBufferManager.addLine(this.options.port, line);
+
+        // Process through device health monitor
+        const healthResult = deviceHealthMonitor.processLine(this.options.port, bufferedLine);
+
+        // Check for reboot patterns (use health monitor result)
+        if (this.options.detectReboot && healthResult.isReboot) {
           this.rebootDetected = true;
+
+          // Broadcast health event if crash detected
+          if (healthResult.isCrash) {
+            serialBroadcaster.broadcast({
+              type: 'device_health',
+              port: this.options.port,
+              event: 'crash_detected',
+              rebootEvent: healthResult.event,
+              timestamp: new Date().toISOString(),
+            });
+          }
+        }
+
+        // Broadcast if loop detected
+        if (healthResult.loopDetected) {
+          serialBroadcaster.broadcast({
+            type: 'device_health',
+            port: this.options.port,
+            event: 'loop_detected',
+            health: deviceHealthMonitor.getHealthStatus(this.options.port),
+            timestamp: new Date().toISOString(),
+          });
         }
 
         // Check for RegisteredInfo pattern
@@ -178,9 +209,9 @@ export class MonitorSession {
                 });
               } else {
                 // Duplicate lacisID, skip broadcast
-                logger.info('Skipping duplicate RegisteredInfo broadcast', { 
-                  port: this.options.port, 
-                  lacisID: registeredInfo.lacisID 
+                logger.info('Skipping duplicate RegisteredInfo broadcast', {
+                  port: this.options.port,
+                  lacisID: registeredInfo.lacisID
                 });
               }
             })
@@ -340,7 +371,24 @@ export class MonitorManager {
     max_lines?: number;
     stop_on?: string;
     detect_reboot?: boolean;
+    force?: boolean;  // Force start even if port is in use
   }): Promise<MonitorSession> {
+    // Check port state
+    const portState = portStateManager.getState(options.port);
+    if (portState.state === 'uploading') {
+      throw new Error(`Port ${options.port} is currently being used for upload. Wait for upload to complete.`);
+    }
+
+    // Try to acquire lock (will fail if port is in use by another operation)
+    const lockResult = portStateManager.tryLock(options.port, 'monitor', options.force);
+    if (!lockResult.success && !options.force) {
+      // Check if it's our own monitor session
+      const existingSession = this.getByPort(options.port);
+      if (!existingSession) {
+        throw new Error(`Port ${options.port} is locked: ${lockResult.error}`);
+      }
+    }
+
     // Stop any existing session on the same port (single session per port policy)
     const existingSession = this.getByPort(options.port);
     if (existingSession) {
@@ -355,12 +403,13 @@ export class MonitorManager {
     }
 
     const token = randomUUID();
-    
+
     let stopRegex: RegExp | undefined;
     if (options.stop_on) {
       try {
         stopRegex = new RegExp(options.stop_on);
       } catch (error) {
+        portStateManager.release(options.port);
         throw new Error(`Invalid stop_on regex: ${options.stop_on}`);
       }
     }
@@ -381,13 +430,17 @@ export class MonitorManager {
 
     try {
       await session.start();
+      // Update port state to monitoring
+      portStateManager.setState(options.port, 'monitoring', { token });
     } catch (error) {
       this.sessions.delete(token);
+      portStateManager.release(options.port);
       throw error;
     }
 
     session.onComplete().then(() => {
       this.sessions.delete(token);
+      portStateManager.release(options.port);
     });
 
     return session;

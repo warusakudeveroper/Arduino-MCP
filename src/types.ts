@@ -104,7 +104,7 @@ export interface MonitorOptions {
 
 // Serial event payload
 export interface SerialEventPayload {
-  type: 'serial' | 'serial_end' | 'install_log';
+  type: 'serial' | 'serial_end' | 'install_log' | 'device_health';
   token?: string;
   port?: string;
   line?: string;
@@ -121,6 +121,10 @@ export interface SerialEventPayload {
   exitCode?: number;
   key?: string;
   entry?: Partial<InstallLogEntry>;
+  // Device health event fields
+  event?: string;
+  rebootEvent?: unknown;
+  health?: unknown;
 }
 
 // Detected port info

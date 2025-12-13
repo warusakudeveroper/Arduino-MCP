@@ -138,6 +138,8 @@ export function getConsoleHtml(): string {
     .port-list-item { display: flex; align-items: center; justify-content: space-between; padding: 8px 10px; border-radius: 6px; margin-bottom: 4px; background: var(--bg-dark); border: 1px solid var(--border); }
     .port-list-item:hover { border-color: var(--accent); }
     .port-list-item.monitoring { border-color: var(--success); background: rgba(34, 197, 94, 0.05); }
+    .port-reset-btn { background: var(--bg-input); border: 1px solid var(--border); color: var(--text-muted); padding: 4px 6px; margin-right: 4px; }
+    .port-reset-btn:hover { background: var(--warning); color: #000; border-color: var(--warning); transform: translateY(-1px); }
     .port-info { display: flex; flex-direction: column; gap: 2px; }
     .port-name { font-weight: 500; font-size: 13px; }
     .port-detail { font-size: 11px; color: var(--text-muted); }
@@ -297,6 +299,109 @@ export function getConsoleHtml(): string {
       <div class="panel">
         <div class="panel-header"><div class="panel-title">📋 Install Log</div><button class="sm outline" id="installLogHistoryBtn">📜 History</button></div>
         <div class="panel-body" id="installLogPanel" style="max-height:250px;"><div class="empty-state" style="padding:20px;"><p>Waiting for ::RegisteredInfo::</p></div></div>
+      </div>
+
+      <!-- Buffer Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📊 Port Buffers</div>
+          <button class="sm outline" id="refreshBufferBtn">↻</button>
+        </div>
+        <div class="control-panel" style="padding:10px;">
+          <div id="bufferStats" style="font-size:12px;color:var(--text-muted);">
+            <div class="empty-state" style="padding:10px;"><p>No buffer data</p></div>
+          </div>
+          <div class="control-row" style="margin-top:8px;">
+            <select id="bufferPortSelect" style="flex:1;font-size:12px;">
+              <option value="">Select port...</option>
+            </select>
+            <button class="sm outline" id="viewBufferBtn">View</button>
+          </div>
+          <div class="control-row">
+            <input type="text" id="bufferSearchInput" placeholder="Search pattern..." style="flex:1;font-size:12px;" />
+            <button class="sm outline" id="searchBufferBtn">🔍</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Capture Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">🎯 Capture</div>
+          <span class="badge info" id="captureStatusBadge">Ready</span>
+        </div>
+        <div class="control-panel" style="padding:10px;">
+          <div class="control-section">
+            <span class="control-label">Wait for Pattern</span>
+            <div class="control-row">
+              <select id="capturePortSelect" style="flex:1;font-size:12px;">
+                <option value="">Select port...</option>
+              </select>
+            </div>
+            <div class="control-row">
+              <input type="text" id="capturePatternInput" placeholder="Pattern (regex)..." style="flex:1;font-size:12px;" />
+            </div>
+            <div class="control-row">
+              <label style="font-size:11px;color:var(--text-muted);">Timeout:</label>
+              <input type="number" id="captureTimeoutInput" value="30" min="5" max="300" style="width:60px;font-size:12px;" />
+              <span style="font-size:11px;color:var(--text-muted);">sec</span>
+            </div>
+            <div class="control-row">
+              <button class="success" style="flex:1" id="startCaptureBtn">▶ Start Capture</button>
+              <button class="danger" style="flex:1" id="cancelCaptureBtn" disabled>⏹ Cancel</button>
+            </div>
+          </div>
+          <div id="captureResult" style="margin-top:8px;font-size:12px;display:none;">
+            <div class="control-label">Result</div>
+            <div id="captureResultContent" style="background:var(--bg-dark);border-radius:6px;padding:8px;max-height:150px;overflow-y:auto;font-family:monospace;"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Device Health Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">🏥 Device Health</div>
+          <button class="sm outline" id="refreshHealthBtn">↻</button>
+        </div>
+        <div class="control-panel" style="padding:10px;">
+          <div id="healthStatus" style="font-size:12px;">
+            <div class="empty-state" style="padding:10px;"><p>No health data</p></div>
+          </div>
+          <div class="control-row" style="margin-top:8px;">
+            <select id="healthPortSelect" style="flex:1;font-size:12px;">
+              <option value="">All ports</option>
+            </select>
+            <button class="sm danger" id="clearHealthBtn" title="Clear health data">🗑</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- SPIFFS File Explorer Panel -->
+      <div class="panel">
+        <div class="panel-header">
+          <div class="panel-title">📁 SPIFFS Explorer</div>
+          <button class="sm outline" id="refreshSpiffsBtn">↻</button>
+        </div>
+        <div class="control-panel" style="padding:10px;">
+          <div class="control-section">
+            <span class="control-label">Device IP</span>
+            <div class="control-row">
+              <input type="text" id="spiffsDeviceIp" placeholder="192.168.x.x" style="flex:1;font-size:12px;" />
+              <button class="sm success" id="connectSpiffsBtn">Connect</button>
+            </div>
+          </div>
+          <div id="spiffsInfo" style="font-size:11px;color:var(--text-muted);margin-bottom:8px;display:none;">
+            <span id="spiffsUsage">-</span>
+          </div>
+          <div id="spiffsFileList" style="max-height:200px;overflow-y:auto;">
+            <div class="empty-state" style="padding:10px;"><p>Enter device IP to browse SPIFFS</p></div>
+          </div>
+          <div class="control-row" style="margin-top:8px;">
+            <button class="sm outline" style="flex:1" id="spiffsUploadBtn" disabled>📤 Upload</button>
+            <button class="sm outline" style="flex:1" id="spiffsNewFileBtn" disabled>➕ New</button>
+          </div>
+        </div>
       </div>
     </div>
   </main>
@@ -655,7 +760,7 @@ export function getConsoleHtml(): string {
         $('availablePorts').innerHTML = filteredPorts.map(p => {
           const m = monitoringPorts.has(p.port), nn = p.nickname || '';
           const typeLabel = p.isEsp32 ? '✓ ESP32' : '<span style="color:var(--text-muted);">不明</span>';
-          return '<div class="port-list-item ' + (m ? 'monitoring' : '') + '" data-port="' + escapeHtml(p.port) + '"><div class="port-info" style="flex:1"><div class="port-name" style="display:flex;align-items:center;gap:6px;"><span class="port-status-icon">' + (m ? '🟢' : '⚪') + '</span><input type="text" value="' + escapeHtml(nn) + '" placeholder="' + escapeHtml(p.port.split('/').pop()) + '" onchange="setPortNickname(\\'' + escapeHtml(p.port) + '\\',this.value)" style="width:80px;padding:2px 4px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg-input);color:var(--text);"><span style="color:var(--text-muted);font-size:10px;">' + escapeHtml(p.port.split('/').pop()) + '</span></div><div class="port-detail">' + typeLabel + '<span class="port-monitoring-status">' + (m ? ' <span style="color:#22c55e;">● Monitoring</span>' : '') + '</span></div></div><button class="sm port-action-btn ' + (m ? 'danger' : 'success') + '" onclick="' + (m ? 'stopPortMonitor' : 'startPortMonitor') + '(\\'' + escapeHtml(p.port) + '\\')">' + (m ? '⏹' : '▶') + '</button></div>';
+          return '<div class="port-list-item ' + (m ? 'monitoring' : '') + '" data-port="' + escapeHtml(p.port) + '"><div class="port-info" style="flex:1"><div class="port-name" style="display:flex;align-items:center;gap:6px;"><span class="port-status-icon">' + (m ? '🟢' : '⚪') + '</span><input type="text" value="' + escapeHtml(nn) + '" placeholder="' + escapeHtml(p.port.split('/').pop()) + '" onchange="setPortNickname(\\'' + escapeHtml(p.port) + '\\',this.value)" style="width:80px;padding:2px 4px;font-size:11px;border:1px solid var(--border);border-radius:4px;background:var(--bg-input);color:var(--text);"><span style="color:var(--text-muted);font-size:10px;">' + escapeHtml(p.port.split('/').pop()) + '</span></div><div class="port-detail">' + typeLabel + '<span class="port-monitoring-status">' + (m ? ' <span style="color:#22c55e;">● Monitoring</span>' : '') + '</span></div></div><button class="sm port-reset-btn" onclick="resetDevice(\\'' + escapeHtml(p.port) + '\\')" title="Reset ESP32 (DTR/RTS)">🔄</button><button class="sm port-action-btn ' + (m ? 'danger' : 'success') + '" onclick="' + (m ? 'stopPortMonitor' : 'startPortMonitor') + '(\\'' + escapeHtml(p.port) + '\\')">' + (m ? '⏹' : '▶') + '</button></div>';
         }).join('');
       } else {
         $('availablePorts').innerHTML = '<div class="empty-state" style="padding:20px;"><p>No ports found</p></div>';
@@ -751,7 +856,43 @@ export function getConsoleHtml(): string {
       await new Promise(r => setTimeout(r, 1000));
       await startPortMonitor(port);
     }
-    
+
+    async function resetDevice(port) {
+      showToast('🔄 Resetting ' + port.split('/').pop() + '...', 'info');
+      try {
+        const r = await fetch('/api/reset-device', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port, method: 'dtr_rts', delay_ms: 100 })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          showToast('✓ Reset ' + port.split('/').pop() + ' successfully', 'success');
+          // If monitor was running, give device time to reboot and auto-restart
+          if (d.wasMonitoring) {
+            await new Promise(r => setTimeout(r, 2000));
+            await startPortMonitor(port);
+          }
+        } else {
+          showToast('✗ Reset failed: ' + (d.error || 'Unknown error'), 'error');
+        }
+      } catch (e) { showToast('✗ Reset error: ' + e.message, 'error'); }
+    }
+
+    async function resetAllDevices() {
+      const esp32Ports = allPorts.filter(p => p.isEsp32).map(p => p.port);
+      if (esp32Ports.length === 0) {
+        showToast('No ESP32 ports found', 'warning');
+        return;
+      }
+      showToast('🔄 Resetting ' + esp32Ports.length + ' device(s)...', 'info');
+      for (const port of esp32Ports) {
+        await resetDevice(port);
+        await new Promise(r => setTimeout(r, 500));
+      }
+      showToast('✓ All devices reset', 'success');
+    }
+
     async function startAllMonitors() {
       const btn = $('startAllBtn');
       btn.disabled = true;
@@ -954,7 +1095,559 @@ export function getConsoleHtml(): string {
       installerQueue = [];
       $('startInstallerBtn').disabled = false;
     }
-    
+
+    // ========== Buffer Functions ==========
+    let currentCaptureId = null;
+
+    async function loadBufferStats() {
+      try {
+        const r = await fetch('/api/buffer-stats');
+        const d = await r.json();
+        if (d.ok) {
+          const stats = d.stats || [];
+          const ports = d.ports || [];
+
+          // Update stats display
+          if (stats.length === 0) {
+            $('bufferStats').innerHTML = '<div style="color:var(--text-muted);font-size:11px;">No buffers active. Start a monitor first.</div>';
+          } else {
+            $('bufferStats').innerHTML = stats.map(s => {
+              const portName = s.port.split('/').pop();
+              return '<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--border);"><span>' + escapeHtml(portName) + '</span><span style="color:var(--accent);">' + s.lineCount + ' lines</span></div>';
+            }).join('');
+          }
+
+          // Update port selects
+          const portOptions = '<option value="">Select port...</option>' + ports.map(p => '<option value="' + escapeHtml(p) + '">' + escapeHtml(p.split('/').pop()) + '</option>').join('');
+          $('bufferPortSelect').innerHTML = portOptions;
+          $('capturePortSelect').innerHTML = portOptions;
+        }
+      } catch (e) {
+        console.error('Failed to load buffer stats:', e);
+      }
+    }
+
+    async function viewBuffer() {
+      const port = $('bufferPortSelect').value;
+      if (!port) {
+        showToast('Select a port first', 'warning');
+        return;
+      }
+
+      try {
+        const r = await fetch('/api/buffer?port=' + encodeURIComponent(port) + '&count=100');
+        const d = await r.json();
+        if (d.ok) {
+          showBufferModal(port, d.lines || [], d.stats);
+        } else {
+          showToast('Failed to load buffer: ' + d.error, 'error');
+        }
+      } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+      }
+    }
+
+    async function searchBuffer() {
+      const port = $('bufferPortSelect').value;
+      const search = $('bufferSearchInput').value.trim();
+
+      if (!port) {
+        showToast('Select a port first', 'warning');
+        return;
+      }
+      if (!search) {
+        showToast('Enter a search pattern', 'warning');
+        return;
+      }
+
+      try {
+        const r = await fetch('/api/buffer?port=' + encodeURIComponent(port) + '&search=' + encodeURIComponent(search));
+        const d = await r.json();
+        if (d.ok) {
+          showBufferModal(port, d.lines || [], d.stats, search);
+        } else {
+          showToast('Search failed: ' + d.error, 'error');
+        }
+      } catch (e) {
+        showToast('Error: ' + e.message, 'error');
+      }
+    }
+
+    function showBufferModal(port, lines, stats, searchPattern) {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+      const title = searchPattern
+        ? '🔍 Search: "' + escapeHtml(searchPattern) + '" (' + lines.length + ' matches)'
+        : '📊 Buffer: ' + escapeHtml(port.split('/').pop()) + ' (' + lines.length + ' lines)';
+
+      const statsInfo = stats
+        ? '<div style="font-size:11px;color:var(--text-muted);margin-bottom:8px;">Total: ' + stats.lineCount + ' lines | Oldest: ' + (stats.oldestTimestamp || 'N/A').split('T')[1]?.slice(0,8) + ' | Newest: ' + (stats.newestTimestamp || 'N/A').split('T')[1]?.slice(0,8) + '</div>'
+        : '';
+
+      const linesHtml = lines.length === 0
+        ? '<div class="empty-state" style="padding:20px;"><p>No lines found</p></div>'
+        : lines.map(l => {
+            const time = l.timestamp ? l.timestamp.split('T')[1]?.slice(0,12) : '';
+            let content = escapeHtml(l.line);
+            if (searchPattern) {
+              try {
+                const re = new RegExp('(' + searchPattern + ')', 'gi');
+                content = content.replace(re, '<span class="highlight-match">$1</span>');
+              } catch (e) {}
+            }
+            return '<div class="log-line"><span class="log-time">' + time + '</span><span class="log-content">' + content + '</span></div>';
+          }).join('');
+
+      overlay.innerHTML = \`
+        <div class="modal" style="max-width:900px;">
+          <div class="modal-header">
+            <span class="modal-title">\${title}</span>
+            <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+          </div>
+          <div class="modal-body" style="font-family:monospace;font-size:12px;">
+            \${statsInfo}
+            <div style="max-height:500px;overflow-y:auto;">
+              \${linesHtml}
+            </div>
+          </div>
+        </div>
+      \`;
+      document.body.appendChild(overlay);
+    }
+
+    // ========== Capture Functions ==========
+    async function startCapture() {
+      const port = $('capturePortSelect').value;
+      const pattern = $('capturePatternInput').value.trim();
+      const timeout = parseInt($('captureTimeoutInput').value) || 30;
+
+      if (!port) {
+        showToast('Select a port first', 'warning');
+        return;
+      }
+      if (!pattern) {
+        showToast('Enter a pattern to capture', 'warning');
+        return;
+      }
+
+      // Validate regex
+      try {
+        new RegExp(pattern);
+      } catch (e) {
+        showToast('Invalid regex pattern', 'error');
+        return;
+      }
+
+      $('startCaptureBtn').disabled = true;
+      $('cancelCaptureBtn').disabled = false;
+      $('captureStatusBadge').className = 'badge warning';
+      $('captureStatusBadge').textContent = 'Capturing...';
+      $('captureResult').style.display = 'none';
+
+      showToast('Capture started, waiting for "' + pattern + '"...', 'info');
+
+      try {
+        const r = await fetch('/api/capture/wait', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            port,
+            pattern,
+            timeout_ms: timeout * 1000
+          })
+        });
+        const d = await r.json();
+
+        currentCaptureId = null;
+        $('startCaptureBtn').disabled = false;
+        $('cancelCaptureBtn').disabled = true;
+
+        if (d.success) {
+          $('captureStatusBadge').className = 'badge success';
+          $('captureStatusBadge').textContent = 'Matched!';
+          showToast('Pattern matched!', 'success');
+
+          $('captureResult').style.display = 'block';
+          $('captureResultContent').innerHTML =
+            '<div style="color:var(--success);margin-bottom:8px;">✓ Pattern matched after ' + d.elapsedMs + 'ms</div>' +
+            '<div style="color:var(--text-muted);margin-bottom:4px;">Matched line:</div>' +
+            '<div class="log-line highlight" style="margin-bottom:8px;">' + escapeHtml(d.matchedLine?.line || '') + '</div>' +
+            '<div style="color:var(--text-muted);">Captured ' + d.capturedLines.length + ' lines</div>';
+        } else {
+          $('captureStatusBadge').className = 'badge danger';
+          $('captureStatusBadge').textContent = d.reason === 'timeout' ? 'Timeout' : 'Failed';
+          showToast('Capture ' + d.reason + ' after ' + d.elapsedMs + 'ms', 'warning');
+
+          $('captureResult').style.display = 'block';
+          $('captureResultContent').innerHTML =
+            '<div style="color:var(--danger);margin-bottom:8px;">✗ ' + (d.reason === 'timeout' ? 'Timeout' : d.reason) + ' after ' + d.elapsedMs + 'ms</div>' +
+            '<div style="color:var(--text-muted);">Captured ' + (d.capturedLines?.length || 0) + ' lines (no match)</div>';
+        }
+      } catch (e) {
+        $('startCaptureBtn').disabled = false;
+        $('cancelCaptureBtn').disabled = true;
+        $('captureStatusBadge').className = 'badge danger';
+        $('captureStatusBadge').textContent = 'Error';
+        showToast('Capture error: ' + e.message, 'error');
+      }
+    }
+
+    async function cancelCapture() {
+      if (!currentCaptureId) {
+        showToast('No active capture to cancel', 'warning');
+        return;
+      }
+
+      try {
+        await fetch('/api/capture/cancel', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ captureId: currentCaptureId })
+        });
+        showToast('Capture cancelled', 'info');
+      } catch (e) {
+        showToast('Cancel failed: ' + e.message, 'error');
+      }
+
+      currentCaptureId = null;
+      $('startCaptureBtn').disabled = false;
+      $('cancelCaptureBtn').disabled = true;
+      $('captureStatusBadge').className = 'badge info';
+      $('captureStatusBadge').textContent = 'Ready';
+    }
+
+    // ========== Device Health Functions ==========
+    async function loadHealthStatus() {
+      try {
+        const port = $('healthPortSelect').value;
+        const url = port ? '/api/device-health?port=' + encodeURIComponent(port) : '/api/device-health';
+        const r = await fetch(url);
+        const d = await r.json();
+
+        if (d.ok) {
+          if (port) {
+            // Single port view
+            renderHealthReport(d);
+          } else {
+            // All devices view
+            renderHealthList(d.devices || []);
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load health status:', e);
+      }
+    }
+
+    function renderHealthReport(report) {
+      const statusColors = {
+        'healthy': 'var(--success)',
+        'unstable': 'var(--warning)',
+        'crash_loop': 'var(--danger)',
+        'unknown': 'var(--text-muted)'
+      };
+      const statusIcons = {
+        'healthy': '✅',
+        'unstable': '⚠️',
+        'crash_loop': '🔴',
+        'unknown': '❓'
+      };
+
+      const status = report.status || 'unknown';
+      const color = statusColors[status] || statusColors['unknown'];
+      const icon = statusIcons[status] || statusIcons['unknown'];
+
+      let html = '<div style="padding:8px;border-left:3px solid ' + color + ';background:var(--bg-dark);border-radius:0 6px 6px 0;margin-bottom:8px;">';
+      html += '<div style="display:flex;align-items:center;gap:8px;"><span style="font-size:16px;">' + icon + '</span><span style="font-weight:600;color:' + color + ';">' + escapeHtml(status.toUpperCase()) + '</span></div>';
+      html += '<div style="color:var(--text-muted);font-size:11px;margin-top:4px;">' + escapeHtml(report.summary || '') + '</div>';
+      html += '</div>';
+
+      if (report.details) {
+        const d = report.details;
+        html += '<div style="font-size:11px;color:var(--text-muted);padding:4px 0;">';
+        html += 'Reboots (5min): <span style="color:var(--text);">' + (d.rebootCountLast5Min || 0) + '</span><br>';
+        if (d.avgUptimeSeconds > 0) {
+          html += 'Avg Uptime: <span style="color:var(--text);">' + Math.round(d.avgUptimeSeconds) + 's</span><br>';
+        }
+        if (d.suggestion) {
+          html += '<div style="margin-top:6px;padding:6px;background:rgba(59,130,246,0.1);border-radius:4px;color:var(--accent);">💡 ' + escapeHtml(d.suggestion) + '</div>';
+        }
+        html += '</div>';
+      }
+
+      $('healthStatus').innerHTML = html;
+    }
+
+    function renderHealthList(devices) {
+      if (devices.length === 0) {
+        $('healthStatus').innerHTML = '<div class="empty-state" style="padding:10px;"><p>No monitored devices</p></div>';
+        return;
+      }
+
+      const statusColors = {
+        'healthy': 'var(--success)',
+        'unstable': 'var(--warning)',
+        'crash_loop': 'var(--danger)',
+        'unknown': 'var(--text-muted)'
+      };
+      const statusIcons = {
+        'healthy': '✅',
+        'unstable': '⚠️',
+        'crash_loop': '🔴',
+        'unknown': '❓'
+      };
+
+      $('healthStatus').innerHTML = devices.map(d => {
+        const color = statusColors[d.status] || statusColors['unknown'];
+        const icon = statusIcons[d.status] || statusIcons['unknown'];
+        const portName = d.port.split('/').pop();
+        return '<div style="display:flex;align-items:center;justify-content:space-between;padding:6px;border-bottom:1px solid var(--border);"><span style="display:flex;align-items:center;gap:6px;"><span>' + icon + '</span><span>' + escapeHtml(portName) + '</span></span><span style="font-size:11px;color:' + color + ';">' + escapeHtml(d.status) + '</span></div>';
+      }).join('');
+
+      // Update port select
+      const ports = devices.map(d => d.port);
+      $('healthPortSelect').innerHTML = '<option value="">All ports</option>' + ports.map(p => '<option value="' + escapeHtml(p) + '">' + escapeHtml(p.split('/').pop()) + '</option>').join('');
+    }
+
+    async function clearHealth() {
+      const port = $('healthPortSelect').value;
+      try {
+        await fetch('/api/device-health/clear', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ port: port || undefined })
+        });
+        showToast('Health data cleared', 'success');
+        loadHealthStatus();
+      } catch (e) {
+        showToast('Failed to clear health data', 'error');
+      }
+    }
+
+    // ========== SPIFFS File Explorer ==========
+    let currentSpiffsIp = '';
+
+    async function connectSpiffs() {
+      const ip = $('spiffsDeviceIp').value.trim();
+      if (!ip) {
+        showToast('Enter device IP address', 'warning');
+        return;
+      }
+      currentSpiffsIp = ip;
+      showToast('Connecting to ' + ip + '...', 'info');
+      await loadSpiffsInfo();
+      await loadSpiffsFiles();
+    }
+
+    async function loadSpiffsInfo() {
+      if (!currentSpiffsIp) return;
+      try {
+        const r = await fetch('/api/spiffs/info?device_ip=' + encodeURIComponent(currentSpiffsIp));
+        const d = await r.json();
+        if (d.ok) {
+          const usedPercent = d.totalBytes > 0 ? Math.round((d.usedBytes / d.totalBytes) * 100) : 0;
+          const usedKB = Math.round(d.usedBytes / 1024);
+          const totalKB = Math.round(d.totalBytes / 1024);
+          $('spiffsInfo').style.display = 'block';
+          $('spiffsUsage').innerHTML = '📊 ' + usedKB + 'KB / ' + totalKB + 'KB (' + usedPercent + '% used)';
+          $('spiffsUploadBtn').disabled = false;
+          $('spiffsNewFileBtn').disabled = false;
+        } else {
+          $('spiffsInfo').style.display = 'none';
+          showToast('Cannot get SPIFFS info: ' + (d.error || 'Unknown error'), 'error');
+        }
+      } catch (e) {
+        $('spiffsInfo').style.display = 'none';
+        showToast('Connection failed: ' + e.message, 'error');
+      }
+    }
+
+    async function loadSpiffsFiles(path = '/') {
+      if (!currentSpiffsIp) return;
+      try {
+        const r = await fetch('/api/spiffs/list?device_ip=' + encodeURIComponent(currentSpiffsIp) + '&path=' + encodeURIComponent(path));
+        const d = await r.json();
+        if (d.ok) {
+          const files = d.files || [];
+          if (files.length === 0) {
+            $('spiffsFileList').innerHTML = '<div class="empty-state" style="padding:10px;"><p>No files in SPIFFS</p></div>';
+          } else {
+            $('spiffsFileList').innerHTML = files.map(f => {
+              const icon = f.isDir ? '📁' : (f.name.endsWith('.json') ? '📋' : (f.name.endsWith('.html') ? '🌐' : '📄'));
+              const sizeStr = f.size !== undefined ? ' <span style="color:var(--text-muted);font-size:10px;">(' + f.size + 'B)</span>' : '';
+              return '<div class="spiffs-file-item" data-path="' + escapeHtml(f.name) + '" style="display:flex;align-items:center;justify-content:space-between;padding:6px 8px;border-bottom:1px solid var(--border);cursor:pointer;"><span style="display:flex;align-items:center;gap:6px;"><span>' + icon + '</span><span style="font-size:12px;">' + escapeHtml(f.name) + '</span>' + sizeStr + '</span><span style="display:flex;gap:4px;"><button class="sm outline spiffs-view-btn" style="padding:2px 6px;font-size:10px;">👁</button><button class="sm outline spiffs-delete-btn" style="padding:2px 6px;font-size:10px;color:var(--danger);">🗑</button></span></div>';
+            }).join('');
+
+            // Attach event handlers
+            document.querySelectorAll('.spiffs-view-btn').forEach(btn => {
+              btn.onclick = e => {
+                e.stopPropagation();
+                const item = e.target.closest('.spiffs-file-item');
+                const filePath = item.dataset.path;
+                viewSpiffsFile(filePath);
+              };
+            });
+            document.querySelectorAll('.spiffs-delete-btn').forEach(btn => {
+              btn.onclick = e => {
+                e.stopPropagation();
+                const item = e.target.closest('.spiffs-file-item');
+                const filePath = item.dataset.path;
+                deleteSpiffsFile(filePath);
+              };
+            });
+          }
+          showToast('Loaded ' + files.length + ' file(s)', 'success');
+        } else {
+          $('spiffsFileList').innerHTML = '<div class="empty-state" style="padding:10px;color:var(--danger);"><p>' + escapeHtml(d.error || 'Failed to list files') + '</p></div>';
+        }
+      } catch (e) {
+        $('spiffsFileList').innerHTML = '<div class="empty-state" style="padding:10px;color:var(--danger);"><p>' + escapeHtml(e.message) + '</p></div>';
+      }
+    }
+
+    async function viewSpiffsFile(filePath) {
+      if (!currentSpiffsIp) return;
+      showToast('Loading ' + filePath + '...', 'info');
+      try {
+        const r = await fetch('/api/spiffs/read?device_ip=' + encodeURIComponent(currentSpiffsIp) + '&path=' + encodeURIComponent(filePath));
+        const d = await r.json();
+        if (d.ok) {
+          showSpiffsFileModal(filePath, d.content);
+        } else {
+          showToast('Failed to read: ' + (d.error || 'Unknown'), 'error');
+        }
+      } catch (e) {
+        showToast('Read error: ' + e.message, 'error');
+      }
+    }
+
+    function showSpiffsFileModal(filePath, content) {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+      const isJson = filePath.endsWith('.json');
+      let formattedContent = content;
+      if (isJson) {
+        try { formattedContent = JSON.stringify(JSON.parse(content), null, 2); } catch (e) {}
+      }
+
+      overlay.innerHTML = \`
+        <div class="modal" style="max-width:700px;">
+          <div class="modal-header">
+            <span class="modal-title">📄 \${escapeHtml(filePath)}</span>
+            <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+          </div>
+          <div class="modal-body">
+            <textarea id="spiffsFileContent" style="width:100%;height:300px;font-family:monospace;font-size:12px;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;resize:vertical;">\${escapeHtml(formattedContent)}</textarea>
+            <div class="control-row" style="margin-top:12px;">
+              <button class="success" style="flex:1" id="saveSpiffsFileBtn">💾 Save</button>
+              <button class="outline" style="flex:1" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      \`;
+      document.body.appendChild(overlay);
+
+      overlay.querySelector('#saveSpiffsFileBtn').onclick = async () => {
+        const newContent = overlay.querySelector('#spiffsFileContent').value;
+        await saveSpiffsFile(filePath, newContent);
+        overlay.remove();
+      };
+    }
+
+    async function saveSpiffsFile(filePath, content) {
+      if (!currentSpiffsIp) return;
+      showToast('Saving ' + filePath + '...', 'info');
+      try {
+        const r = await fetch('/api/spiffs/write', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_ip: currentSpiffsIp, path: filePath, content })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          showToast('Saved ' + filePath, 'success');
+          loadSpiffsFiles();
+          loadSpiffsInfo();
+        } else {
+          showToast('Save failed: ' + (d.error || 'Unknown'), 'error');
+        }
+      } catch (e) {
+        showToast('Save error: ' + e.message, 'error');
+      }
+    }
+
+    async function deleteSpiffsFile(filePath) {
+      if (!currentSpiffsIp) return;
+      if (!confirm('Delete ' + filePath + '?')) return;
+      showToast('Deleting ' + filePath + '...', 'info');
+      try {
+        const r = await fetch('/api/spiffs/delete', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ device_ip: currentSpiffsIp, path: filePath })
+        });
+        const d = await r.json();
+        if (d.ok) {
+          showToast('Deleted ' + filePath, 'success');
+          loadSpiffsFiles();
+          loadSpiffsInfo();
+        } else {
+          showToast('Delete failed: ' + (d.error || 'Unknown'), 'error');
+        }
+      } catch (e) {
+        showToast('Delete error: ' + e.message, 'error');
+      }
+    }
+
+    function showNewSpiffsFileModal() {
+      if (!currentSpiffsIp) {
+        showToast('Connect to a device first', 'warning');
+        return;
+      }
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.onclick = e => { if (e.target === overlay) overlay.remove(); };
+
+      overlay.innerHTML = \`
+        <div class="modal" style="max-width:500px;">
+          <div class="modal-header">
+            <span class="modal-title">➕ New File</span>
+            <button class="modal-close" onclick="this.closest('.modal-overlay').remove()">×</button>
+          </div>
+          <div class="modal-body">
+            <div class="control-section">
+              <span class="control-label">File Name</span>
+              <input type="text" id="newSpiffsFileName" placeholder="/filename.txt" style="width:100%;font-size:13px;" />
+            </div>
+            <div class="control-section" style="margin-top:12px;">
+              <span class="control-label">Content</span>
+              <textarea id="newSpiffsFileContent" style="width:100%;height:150px;font-family:monospace;font-size:12px;background:var(--bg-dark);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:10px;"></textarea>
+            </div>
+            <div class="control-row" style="margin-top:12px;">
+              <button class="success" style="flex:1" id="createSpiffsFileBtn">➕ Create</button>
+              <button class="outline" style="flex:1" onclick="this.closest('.modal-overlay').remove()">Cancel</button>
+            </div>
+          </div>
+        </div>
+      \`;
+      document.body.appendChild(overlay);
+
+      overlay.querySelector('#createSpiffsFileBtn').onclick = async () => {
+        const fileName = overlay.querySelector('#newSpiffsFileName').value.trim();
+        const content = overlay.querySelector('#newSpiffsFileContent').value;
+        if (!fileName) {
+          showToast('Enter a file name', 'warning');
+          return;
+        }
+        const path = fileName.startsWith('/') ? fileName : '/' + fileName;
+        await saveSpiffsFile(path, content);
+        overlay.remove();
+      };
+    }
+
     // ========== SSE Connection ==========
     function connect() {
       if (es) es.close();
@@ -973,6 +1666,14 @@ export function getConsoleHtml(): string {
           } else if (d.type === 'install_log') {
             loadInstallLogs();
             showToast('📋 RegisteredInfo detected', 'success');
+          } else if (d.type === 'device_health') {
+            // Device health event - crash detected or loop detected
+            loadHealthStatus();
+            if (d.event === 'crash_detected') {
+              showToast('🔴 Crash detected on ' + (d.port || 'device'), 'error');
+            } else if (d.event === 'loop_detected') {
+              showToast('⚠️ Loop detected on ' + (d.port || 'device'), 'warning');
+            }
           }
         } catch (e) {}
       };
@@ -1037,6 +1738,23 @@ export function getConsoleHtml(): string {
     $('stopPollingBtn').onclick = stopPolling;
     $('startInstallerBtn').onclick = startInstaller;
     $('installLogHistoryBtn').onclick = showInstallLogHistory;
+
+    // Buffer/Capture event listeners
+    $('refreshBufferBtn').onclick = loadBufferStats;
+    $('viewBufferBtn').onclick = viewBuffer;
+    $('searchBufferBtn').onclick = searchBuffer;
+    $('startCaptureBtn').onclick = startCapture;
+    $('cancelCaptureBtn').onclick = cancelCapture;
+    $('bufferSearchInput').onkeypress = e => { if (e.key === 'Enter') searchBuffer(); };
+    // Health panel event listeners
+    $('refreshHealthBtn').onclick = loadHealthStatus;
+    $('clearHealthBtn').onclick = clearHealth;
+    $('healthPortSelect').onchange = loadHealthStatus;
+    // SPIFFS explorer event listeners
+    $('connectSpiffsBtn').onclick = connectSpiffs;
+    $('refreshSpiffsBtn').onclick = () => { loadSpiffsInfo(); loadSpiffsFiles(); };
+    $('spiffsNewFileBtn').onclick = showNewSpiffsFileModal;
+    $('spiffsDeviceIp').onkeypress = e => { if (e.key === 'Enter') connectSpiffs(); };
     $('restartServerBtn').onclick = async () => {
       if (!confirm('Restart server?')) return;
       try {
@@ -1051,7 +1769,13 @@ export function getConsoleHtml(): string {
       connect();
       await scanPorts();
       loadInstallLogs();
-      
+      loadBufferStats();
+      loadHealthStatus();
+
+      // Refresh buffer stats and health periodically
+      setInterval(loadBufferStats, 5000);
+      setInterval(loadHealthStatus, 10000);
+
       // Auto-start disabled - manual start recommended to avoid port conflicts
       // Users should click "Start All ESP32" button when ready
     }

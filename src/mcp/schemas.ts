@@ -132,6 +132,59 @@ export const getLogsSchema = z.object({
   pattern: z.string().optional().describe('Filter logs by regex pattern'),
 });
 
+// Get port states schema
+export const getPortStatesSchema = z.object({
+  port: z.string().optional().describe('Get state for specific port, or all ports if not specified'),
+});
+
+// Get device health schema
+export const getDeviceHealthSchema = z.object({
+  port: z.string().optional().describe('Get health for specific port, or all monitored devices if not specified'),
+});
+
+// Clear device health schema
+export const clearDeviceHealthSchema = z.object({
+  port: z.string().optional().describe('Clear health data for specific port, or all ports if not specified'),
+});
+
+// Reset device schema
+export const resetDeviceSchema = z.object({
+  port: z.string().describe('Serial port of the ESP32 to reset'),
+  method: z.enum(['dtr_rts', 'esptool']).optional().default('dtr_rts').describe('Reset method: dtr_rts (fast, via serial control lines) or esptool (more reliable, uses esptool.py)'),
+  delay_ms: z.number().int().positive().optional().default(100).describe('Delay in milliseconds for DTR/RTS pulse'),
+});
+
+// SPIFFS file explorer schemas
+export const spiffsListSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device (e.g., "192.168.1.100")'),
+  path: z.string().optional().default('/').describe('Directory path to list (default: root)'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout in milliseconds'),
+});
+
+export const spiffsReadSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to read (e.g., "/config.json")'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout in milliseconds'),
+});
+
+export const spiffsWriteSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to write (e.g., "/config.json")'),
+  content: z.string().describe('Content to write to the file'),
+  timeout_ms: z.number().int().positive().optional().default(15000).describe('Request timeout in milliseconds'),
+});
+
+export const spiffsDeleteSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to delete'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout in milliseconds'),
+});
+
+export const spiffsInfoSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout in milliseconds'),
+});
+
 // Type exports
 export type CompileParams = z.infer<typeof compileSchema>;
 export type UploadParams = z.infer<typeof uploadSchema>;
@@ -149,4 +202,13 @@ export type WorkspaceSetupParams = z.infer<typeof workspaceSetupSchema>;
 export type EraseFlashParams = z.infer<typeof eraseFlashSchema>;
 export type SpiffsUploadParams = z.infer<typeof spiffsUploadSchema>;
 export type GetLogsParams = z.infer<typeof getLogsSchema>;
+export type GetPortStatesParams = z.infer<typeof getPortStatesSchema>;
+export type GetDeviceHealthParams = z.infer<typeof getDeviceHealthSchema>;
+export type ClearDeviceHealthParams = z.infer<typeof clearDeviceHealthSchema>;
+export type ResetDeviceParams = z.infer<typeof resetDeviceSchema>;
+export type SpiffsListParams = z.infer<typeof spiffsListSchema>;
+export type SpiffsReadParams = z.infer<typeof spiffsReadSchema>;
+export type SpiffsWriteParams = z.infer<typeof spiffsWriteSchema>;
+export type SpiffsDeleteParams = z.infer<typeof spiffsDeleteSchema>;
+export type SpiffsInfoParams = z.infer<typeof spiffsInfoSchema>;
 

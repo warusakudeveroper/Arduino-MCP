@@ -1,11 +1,11 @@
 {
   "mcpServers": {
     "mcp-arduino-esp32": {
-      "command": "node",
-      "args": ["/Users/hideaikurata/Library/CloudStorage/Dropbox/Mac (3)/Documents/arduino_mcp/dist/index.js"],
+      "command": "mcp-arduino-esp32",
+      "cwd": "/Users/hideakikurata/.cursor/worktrees/arduino_mcp/giu",
       "env": {
-        "PATH": "/opt/homebrew/bin:/Users/hideaikurata/.nvm/versions/node/v22.20.0/bin:/usr/local/bin:/usr/bin:/bin",
-        "MCP_PYTHON": "/Users/hideaikurata/Library/CloudStorage/Dropbox/Mac (3)/Documents/arduino_mcp/.venv/bin/python"
+        "PATH": "/bin:/usr/bin:/opt/homebrew/bin:/Users/hideakikurata/.nvm/versions/node/v22.19.0/bin:${PATH}",
+        "MCP_PYTHON": "/Users/hideakikurata/.cursor/worktrees/arduino_mcp/giu/.venv/bin/python"
       }
     }
   }

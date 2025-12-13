@@ -14,9 +14,11 @@ import pkg from '../package.json' with { type: 'json' };
 
 // New modular imports
 import { createLogger } from './utils/logger.js';
-import { 
+import {
   serialBroadcaster,
   monitorManager,
+  portStateManager,
+  deviceHealthMonitor,
 } from './serial/index.js';
 import { 
   consoleServer,
@@ -108,6 +110,10 @@ const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS/Linux/Windows. Tools pr
 - monitor_start / monitor_stop: stream serial output with stop conditions + reboot detection
 - start_console: launch local SSE console (http://127.0.0.1:4173) with crash/alert detection
 - get_logs: retrieve buffered serial logs for AI-driven verification
+- get_port_states: check port status (idle/monitoring/uploading) before operations
+- get_device_health: diagnose unstable devices (crash loops, WDT triggers, brownouts)
+- clear_device_health: reset health counters after resolving issues
+- reset_device: reset ESP32 via DTR/RTS (equivalent to EN button press)
 
 🔌 BOARD & LIBRARY:
 - board_list: list detected serial ports via arduino-cli
@@ -116,6 +122,13 @@ const INSTRUCTIONS = `MCP Arduino ESP32 server for macOS/Linux/Windows. Tools pr
 📌 PIN UTILITIES:
 - pin_spec: ESP32-DevKitC pin specification reference
 - pin_check: validate sketch pin usage against DevKitC constraints
+
+📁 SPIFFS FILE EXPLORER (networked devices):
+- spiffs_list: list files in ESP32 SPIFFS via HTTP API
+- spiffs_read: read file content from ESP32 SPIFFS
+- spiffs_write: write file to ESP32 SPIFFS
+- spiffs_delete: delete file from ESP32 SPIFFS
+- spiffs_info: get SPIFFS storage info (total/used/free)
 
 Defaults: FQBN esp32:esp32:esp32 (override with ESP32_FQBN). arduino-cli path can be overridden via ARDUINO_CLI.`;
 
@@ -492,6 +505,55 @@ const getLogsSchema = z.object({
   port: z.string().optional().describe('Filter logs by port'),
   max_lines: z.number().int().positive().optional().default(100).describe('Maximum number of log lines to return'),
   pattern: z.string().optional().describe('Filter logs by regex pattern'),
+});
+
+const getPortStatesSchema = z.object({
+  port: z.string().optional().describe('Get state for specific port, or all ports if not specified'),
+});
+
+const getDeviceHealthSchema = z.object({
+  port: z.string().optional().describe('Get health for specific port, or all monitored devices if not specified'),
+});
+
+const clearDeviceHealthSchema = z.object({
+  port: z.string().optional().describe('Clear health data for specific port, or all ports if not specified'),
+});
+
+const resetDeviceSchema = z.object({
+  port: z.string().describe('Serial port of the ESP32 to reset'),
+  method: z.enum(['dtr_rts', 'esptool']).optional().default('dtr_rts').describe('Reset method: dtr_rts (fast, via serial control lines) or esptool (more reliable, uses esptool.py)'),
+  delay_ms: z.number().int().positive().optional().default(100).describe('Delay in milliseconds for DTR/RTS pulse'),
+});
+
+// SPIFFS file explorer schemas
+const spiffsListSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().optional().default('/').describe('Directory path to list'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout'),
+});
+
+const spiffsReadSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to read'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout'),
+});
+
+const spiffsWriteSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to write'),
+  content: z.string().describe('Content to write'),
+  timeout_ms: z.number().int().positive().optional().default(15000).describe('Request timeout'),
+});
+
+const spiffsDeleteSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  path: z.string().describe('File path to delete'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout'),
+});
+
+const spiffsInfoSchema = z.object({
+  device_ip: z.string().describe('IP address of the ESP32 device'),
+  timeout_ms: z.number().int().positive().optional().default(10000).describe('Request timeout'),
 });
 
 function toToolResult(data: unknown, message?: string): CallToolResult {
@@ -1412,6 +1474,332 @@ async function runSpiffsUpload(args: z.infer<typeof spiffsUploadSchema>) {
   }
 }
 
+// Python script for DTR/RTS reset (equivalent to pressing EN button)
+const RESET_SCRIPT = `
+import sys
+import time
+
+try:
+    import serial
+except ImportError:
+    print("ERROR: pyserial not installed", file=sys.stderr)
+    sys.exit(1)
+
+port = sys.argv[1]
+delay_ms = int(sys.argv[2]) if len(sys.argv) > 2 else 100
+delay_s = delay_ms / 1000.0
+
+try:
+    ser = serial.Serial(port, 115200, timeout=0.5)
+
+    # DTR/RTS reset sequence (same as EN button press)
+    # This is the standard ESP32 auto-reset sequence
+    ser.dtr = False
+    ser.rts = True   # EN pin LOW (reset)
+    time.sleep(delay_s)
+    ser.dtr = True
+    ser.rts = False  # EN pin HIGH (release)
+    time.sleep(0.05)
+    ser.dtr = False
+
+    ser.close()
+    print("OK: Reset completed")
+except serial.SerialException as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+except Exception as e:
+    print(f"ERROR: {e}", file=sys.stderr)
+    sys.exit(1)
+`;
+
+async function runResetDevice(args: z.infer<typeof resetDeviceSchema>) {
+  const { port, method, delay_ms } = args;
+
+  try {
+    // Check if port is currently being monitored
+    const portState = portStateManager.getState(port);
+    if (portState.state === 'monitoring') {
+      // Stop the monitor first
+      const session = monitorManager.getByPort(port);
+      if (session) {
+        await session.stop();
+        // Brief wait for port release
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+    }
+
+    if (method === 'esptool') {
+      // Use esptool.py for reset (more reliable but slower)
+      const result = await execa(PYTHON, [
+        '-m', 'esptool',
+        '--chip', 'esp32',
+        '--port', port,
+        '--before', 'default_reset',
+        '--after', 'hard_reset',
+        'chip_id',
+      ], { reject: false, timeout: 15000 });
+
+      if (result.exitCode === 0) {
+        return toToolResult({
+          ok: true,
+          port,
+          method: 'esptool',
+          message: 'ESP32 reset successfully via esptool',
+        }, `ESP32 on ${port} has been reset`);
+      }
+      return toToolResult({
+        ok: false,
+        port,
+        method: 'esptool',
+        error: result.stderr || 'esptool reset failed',
+      }, `Failed to reset ESP32: ${result.stderr}`);
+    }
+
+    // Default: DTR/RTS method (fast)
+    const result = await execa(PYTHON, ['-c', RESET_SCRIPT, port, String(delay_ms)], {
+      reject: false,
+      timeout: 5000,
+    });
+
+    if (result.exitCode === 0) {
+      return toToolResult({
+        ok: true,
+        port,
+        method: 'dtr_rts',
+        delay_ms,
+        message: 'ESP32 reset successfully via DTR/RTS',
+      }, `ESP32 on ${port} has been reset`);
+    }
+
+    return toToolResult({
+      ok: false,
+      port,
+      method: 'dtr_rts',
+      error: result.stderr || 'DTR/RTS reset failed',
+    }, `Failed to reset ESP32: ${result.stderr}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return toToolResult({ ok: false, port, error: message }, `Reset failed: ${message}`);
+  }
+}
+
+// SPIFFS File Explorer functions
+// These functions communicate with ESP32 devices via HTTP API
+// ESP32 must be running firmware with SPIFFS API endpoints
+
+interface SpiffsFile {
+  name: string;
+  size: number;
+  isDir?: boolean;
+}
+
+interface SpiffsInfo {
+  totalBytes: number;
+  usedBytes: number;
+  freeBytes: number;
+}
+
+async function httpRequest(
+  baseUrl: string,
+  endpoint: string,
+  method: 'GET' | 'POST' | 'DELETE',
+  body?: string,
+  timeoutMs = 10000
+): Promise<{ ok: boolean; status: number; data?: unknown; error?: string }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const url = `http://${baseUrl}${endpoint}`;
+    const options: RequestInit = {
+      method,
+      signal: controller.signal,
+      headers: {
+        'Content-Type': method === 'POST' ? 'application/json' : 'text/plain',
+      },
+    };
+
+    if (body && method === 'POST') {
+      options.body = body;
+    }
+
+    const response = await fetch(url, options);
+    clearTimeout(timeoutId);
+
+    const contentType = response.headers.get('content-type') || '';
+    let data: unknown;
+
+    if (contentType.includes('application/json')) {
+      data = await response.json();
+    } else {
+      data = await response.text();
+    }
+
+    return {
+      ok: response.ok,
+      status: response.status,
+      data,
+    };
+  } catch (error) {
+    clearTimeout(timeoutId);
+    const message = error instanceof Error ? error.message : String(error);
+    if (message.includes('aborted')) {
+      return { ok: false, status: 0, error: `Request timeout after ${timeoutMs}ms` };
+    }
+    return { ok: false, status: 0, error: message };
+  }
+}
+
+async function runSpiffsList(args: z.infer<typeof spiffsListSchema>) {
+  const { device_ip, path, timeout_ms } = args;
+
+  const result = await httpRequest(
+    device_ip,
+    `/api/spiffs/list?path=${encodeURIComponent(path)}`,
+    'GET',
+    undefined,
+    timeout_ms
+  );
+
+  if (!result.ok) {
+    return toToolResult({
+      ok: false,
+      device_ip,
+      path,
+      error: result.error || `HTTP ${result.status}`,
+    }, `Failed to list SPIFFS: ${result.error}`);
+  }
+
+  const files = result.data as SpiffsFile[] | { files: SpiffsFile[] };
+  const fileList = Array.isArray(files) ? files : files?.files || [];
+
+  return toToolResult({
+    ok: true,
+    device_ip,
+    path,
+    files: fileList,
+    count: fileList.length,
+  }, `Found ${fileList.length} file(s) in ${path}`);
+}
+
+async function runSpiffsRead(args: z.infer<typeof spiffsReadSchema>) {
+  const { device_ip, path, timeout_ms } = args;
+
+  const result = await httpRequest(
+    device_ip,
+    `/api/spiffs/read?path=${encodeURIComponent(path)}`,
+    'GET',
+    undefined,
+    timeout_ms
+  );
+
+  if (!result.ok) {
+    return toToolResult({
+      ok: false,
+      device_ip,
+      path,
+      error: result.error || `HTTP ${result.status}`,
+    }, `Failed to read file: ${result.error}`);
+  }
+
+  const content = typeof result.data === 'string' ? result.data : JSON.stringify(result.data);
+
+  return toToolResult({
+    ok: true,
+    device_ip,
+    path,
+    content,
+    size: content.length,
+  }, `Read ${content.length} bytes from ${path}`);
+}
+
+async function runSpiffsWrite(args: z.infer<typeof spiffsWriteSchema>) {
+  const { device_ip, path, content, timeout_ms } = args;
+
+  const result = await httpRequest(
+    device_ip,
+    `/api/spiffs/write?path=${encodeURIComponent(path)}`,
+    'POST',
+    content,
+    timeout_ms
+  );
+
+  if (!result.ok) {
+    return toToolResult({
+      ok: false,
+      device_ip,
+      path,
+      error: result.error || `HTTP ${result.status}`,
+    }, `Failed to write file: ${result.error}`);
+  }
+
+  return toToolResult({
+    ok: true,
+    device_ip,
+    path,
+    written: content.length,
+  }, `Wrote ${content.length} bytes to ${path}`);
+}
+
+async function runSpiffsDelete(args: z.infer<typeof spiffsDeleteSchema>) {
+  const { device_ip, path, timeout_ms } = args;
+
+  const result = await httpRequest(
+    device_ip,
+    `/api/spiffs/delete?path=${encodeURIComponent(path)}`,
+    'DELETE',
+    undefined,
+    timeout_ms
+  );
+
+  if (!result.ok) {
+    return toToolResult({
+      ok: false,
+      device_ip,
+      path,
+      error: result.error || `HTTP ${result.status}`,
+    }, `Failed to delete file: ${result.error}`);
+  }
+
+  return toToolResult({
+    ok: true,
+    device_ip,
+    path,
+  }, `Deleted ${path}`);
+}
+
+async function runSpiffsInfo(args: z.infer<typeof spiffsInfoSchema>) {
+  const { device_ip, timeout_ms } = args;
+
+  const result = await httpRequest(
+    device_ip,
+    '/api/spiffs/info',
+    'GET',
+    undefined,
+    timeout_ms
+  );
+
+  if (!result.ok) {
+    return toToolResult({
+      ok: false,
+      device_ip,
+      error: result.error || `HTTP ${result.status}`,
+    }, `Failed to get SPIFFS info: ${result.error}`);
+  }
+
+  const info = result.data as SpiffsInfo;
+  const usedPercent = info.totalBytes > 0 ? Math.round((info.usedBytes / info.totalBytes) * 100) : 0;
+
+  return toToolResult({
+    ok: true,
+    device_ip,
+    totalBytes: info.totalBytes,
+    usedBytes: info.usedBytes,
+    freeBytes: info.freeBytes,
+    usedPercent,
+  }, `SPIFFS: ${usedPercent}% used (${info.usedBytes}/${info.totalBytes} bytes)`);
+}
+
 function runGetLogs(args: z.infer<typeof getLogsSchema>) {
   const buffer = serialBroadcaster.getBuffer();
   let logs = buffer.filter((evt) => evt.type === 'serial');
@@ -1857,6 +2245,93 @@ server.registerTool('get_logs', {
   description: 'Retrieve buffered serial logs from active monitors. Useful for AI-driven verification.',
   inputSchema: getLogsSchema.shape,
 }, async (params) => runGetLogs(getLogsSchema.parse(params)));
+
+server.registerTool('get_port_states', {
+  title: 'Get Port States',
+  description: 'Get the current state of serial ports (idle, monitoring, uploading, etc). Use this to check port availability before operations.',
+  inputSchema: getPortStatesSchema.shape,
+}, async (params) => {
+  const parsed = getPortStatesSchema.parse(params);
+  if (parsed.port) {
+    const state = portStateManager.getState(parsed.port);
+    return toToolResult({ ok: true, state });
+  }
+  const summary = portStateManager.getSummary();
+  return toToolResult({ ok: true, ...summary });
+});
+
+server.registerTool('get_device_health', {
+  title: 'Get Device Health',
+  description: 'Get device health status including reboot detection, crash loops, and suggestions. Use this to diagnose unstable ESP32 devices.',
+  inputSchema: getDeviceHealthSchema.shape,
+}, async (params) => {
+  const parsed = getDeviceHealthSchema.parse(params);
+  if (parsed.port) {
+    const report = deviceHealthMonitor.getAIReport(parsed.port);
+    return toToolResult({
+      ok: true,
+      port: parsed.port,
+      ...report,
+    }, report.summary);
+  }
+  const allHealth = deviceHealthMonitor.getAllHealthStatus();
+  const hasIssues = allHealth.some(h => h.status !== 'healthy' && h.status !== 'unknown');
+  const message = hasIssues
+    ? `Health issues detected on ${allHealth.filter(h => h.status !== 'healthy' && h.status !== 'unknown').length} device(s)`
+    : 'All monitored devices are healthy';
+  return toToolResult({ ok: true, devices: allHealth }, message);
+});
+
+server.registerTool('clear_device_health', {
+  title: 'Clear Device Health Data',
+  description: 'Clear accumulated health data for a port or all ports. Use this after resolving issues to reset counters.',
+  inputSchema: clearDeviceHealthSchema.shape,
+}, async (params) => {
+  const parsed = clearDeviceHealthSchema.parse(params);
+  if (parsed.port) {
+    deviceHealthMonitor.clearPort(parsed.port);
+    return toToolResult({ ok: true, message: `Health data cleared for ${parsed.port}` });
+  }
+  deviceHealthMonitor.clearAll();
+  return toToolResult({ ok: true, message: 'All health data cleared' });
+});
+
+server.registerTool('reset_device', {
+  title: 'Reset ESP32 Device',
+  description: 'Reset an ESP32 device via DTR/RTS serial control lines (equivalent to pressing EN button). Fast method for restarting the device without physical access.',
+  inputSchema: resetDeviceSchema.shape,
+}, async (params) => runResetDevice(resetDeviceSchema.parse(params)));
+
+// SPIFFS File Explorer tools
+server.registerTool('spiffs_list', {
+  title: 'List SPIFFS Files',
+  description: 'List files in the SPIFFS filesystem of a networked ESP32 device. Device must be running firmware with SPIFFS API endpoints.',
+  inputSchema: spiffsListSchema.shape,
+}, async (params) => runSpiffsList(spiffsListSchema.parse(params)));
+
+server.registerTool('spiffs_read', {
+  title: 'Read SPIFFS File',
+  description: 'Read the contents of a file from SPIFFS on a networked ESP32 device.',
+  inputSchema: spiffsReadSchema.shape,
+}, async (params) => runSpiffsRead(spiffsReadSchema.parse(params)));
+
+server.registerTool('spiffs_write', {
+  title: 'Write SPIFFS File',
+  description: 'Write content to a file in SPIFFS on a networked ESP32 device.',
+  inputSchema: spiffsWriteSchema.shape,
+}, async (params) => runSpiffsWrite(spiffsWriteSchema.parse(params)));
+
+server.registerTool('spiffs_delete', {
+  title: 'Delete SPIFFS File',
+  description: 'Delete a file from SPIFFS on a networked ESP32 device.',
+  inputSchema: spiffsDeleteSchema.shape,
+}, async (params) => runSpiffsDelete(spiffsDeleteSchema.parse(params)));
+
+server.registerTool('spiffs_info', {
+  title: 'Get SPIFFS Info',
+  description: 'Get storage information (total, used, free bytes) from SPIFFS on a networked ESP32 device.',
+  inputSchema: spiffsInfoSchema.shape,
+}, async (params) => runSpiffsInfo(spiffsInfoSchema.parse(params)));
 
 async function main() {
   // Initialize workspace on startup
